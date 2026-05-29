@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <plugins>
-  <pyqgis_plugin name="QD RIP Auvergne" version="1.0.0">
+  <pyqgis_plugin name="QD RIP Auvergne" version="1.0.1">
     <description>Controle qualite RIP Auvergne : chevauchements C0/existant, doublons, parcours longs, BAL isolees</description>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <qgis_minimum_version>3.16</qgis_minimum_version>
+    <qgis_maximum_version>4.99</qgis_maximum_version>
     <homepage>https://github.com/Pleymove/Test_QD_RIP_Auvergne</homepage>
     <file_name>QD_RIP_Auvergne_QC.zip</file_name>
     <author_name>Pleymove</author_name>
