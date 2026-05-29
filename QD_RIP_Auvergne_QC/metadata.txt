@@ -1,8 +1,9 @@
 [general]
 name=QD RIP Auvergne
 qgisMinimumVersion=3.16
+qgisMaximumVersion=4.99
 description=Contrôle qualité RIP Auvergne : chevauchements C0/existant, doublons, parcours longs, BAL isolées
-version=1.0.0
+version=1.0.1
 author=Pleymove
 email=pierrebirau@gmail.com
 homepage=https://github.com/pleymove/test_qd_rip_auvergne
