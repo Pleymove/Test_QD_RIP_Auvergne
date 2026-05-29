@@ -9,7 +9,7 @@ Onglets :
 
 import csv
 
-from PyQt5.QtWidgets import (
+from qgis.PyQt.QtWidgets import (
     QDialog, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QDoubleSpinBox, QSpinBox, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
@@ -17,14 +17,27 @@ from PyQt5.QtWidgets import (
     QApplication, QAbstractItemView, QFileDialog, QFrame,
     QSplitter,
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QBrush, QFont
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor, QBrush, QFont
 
 from qgis.core import (
     QgsProject, QgsSpatialIndex, QgsFeatureRequest, QgsRectangle,
 )
-from qgis.gui import QgsMapLayerComboBox, QgsMapLayerProxyModel
+from qgis.gui import QgsMapLayerComboBox
 from qgis.utils import iface
+
+# Resolution du filtre de couche, compatible QGIS 3.16 -> 4.x
+try:
+    from qgis.core import Qgis
+    _F_LINE = Qgis.LayerFilter.LineLayer
+    _F_POINT = Qgis.LayerFilter.PointLayer
+except (ImportError, AttributeError):
+    try:
+        from qgis.core import QgsMapLayerProxyModel
+    except ImportError:
+        from qgis.gui import QgsMapLayerProxyModel
+    _F_LINE = QgsMapLayerProxyModel.LineLayer
+    _F_POINT = QgsMapLayerProxyModel.PointLayer
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -70,7 +83,7 @@ class QDRIPDialog(QDialog):
         self.setWindowTitle('QD RIP Auvergne — Contrôle Qualité')
         self.setMinimumSize(980, 700)
         self.resize(1200, 800)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
         self._build_ui()
         self._auto_select_layers()
 
@@ -139,10 +152,10 @@ class QDRIPDialog(QDialog):
     def _style_table(tbl):
         tbl.setSortingEnabled(True)
         tbl.setAlternatingRowColors(True)
-        tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
-        tbl.setSelectionMode(QAbstractItemView.SingleSelection)
-        tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        tbl.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.verticalHeader().setDefaultSectionSize(22)
         tbl.setWordWrap(False)
@@ -193,7 +206,7 @@ class QDRIPDialog(QDialog):
 
         frm = QFormLayout()
         self.cb_infra_chev = QgsMapLayerComboBox()
-        self.cb_infra_chev.setFilters(QgsMapLayerProxyModel.LineLayer)
+        self.cb_infra_chev.setFilters(_F_LINE)
         frm.addRow('Couche Infra :', self.cb_infra_chev)
 
         self.le_c0_filter = QLineEdit('"statut" = \'C\' AND "mode_pose" = 0')
@@ -213,7 +226,7 @@ class QDRIPDialog(QDialog):
             chk = QCheckBox(label)
             chk.setChecked(checked)
             cb = QgsMapLayerComboBox()
-            cb.setFilters(QgsMapLayerProxyModel.LineLayer)
+            cb.setFilters(_F_LINE)
             row.addWidget(chk)
             row.addWidget(cb, 1)
             gl.addLayout(row)
@@ -315,7 +328,7 @@ class QDRIPDialog(QDialog):
 
         frm = QFormLayout()
         self.cb_infra_doub = QgsMapLayerComboBox()
-        self.cb_infra_doub.setFilters(QgsMapLayerProxyModel.LineLayer)
+        self.cb_infra_doub.setFilters(_F_LINE)
         frm.addRow('Couche Infra :', self.cb_infra_doub)
 
         self.le_flt_doub = QLineEdit('"statut" = \'C\' AND "mode_pose" = 0')
@@ -399,7 +412,7 @@ class QDRIPDialog(QDialog):
 
         frm = QFormLayout()
         self.cb_infra_parc = QgsMapLayerComboBox()
-        self.cb_infra_parc.setFilters(QgsMapLayerProxyModel.LineLayer)
+        self.cb_infra_parc.setFilters(_F_LINE)
         frm.addRow('Couche :', self.cb_infra_parc)
 
         self.le_flt_parc = QLineEdit()
@@ -470,11 +483,11 @@ class QDRIPDialog(QDialog):
         frm = QFormLayout()
 
         self.cb_bal = QgsMapLayerComboBox()
-        self.cb_bal.setFilters(QgsMapLayerProxyModel.PointLayer)
+        self.cb_bal.setFilters(_F_POINT)
         frm.addRow('Couche BAL :', self.cb_bal)
 
         self.cb_infra_bal = QgsMapLayerComboBox()
-        self.cb_infra_bal.setFilters(QgsMapLayerProxyModel.LineLayer)
+        self.cb_infra_bal.setFilters(_F_LINE)
         frm.addRow('Couche Infra :', self.cb_infra_bal)
 
         self.le_flt_bal = QLineEdit('"statut" = \'C\' AND "mode_pose" = 0')
@@ -599,7 +612,7 @@ class QDRIPDialog(QDialog):
             'Analyse chevauchements…', 'Annuler', 0, len(c0_feats), self)
         prog.setWindowTitle('Analyse en cours')
         prog.setMinimumDuration(0)
-        prog.setWindowModality(Qt.WindowModal)
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
 
         results = []
         infra_fnames = infra_lyr.fields().names()
@@ -683,11 +696,11 @@ class QDRIPDialog(QDialog):
                 self.tbl_chev.setItem(row, col, item)
 
             # Store IDs in col 0 for zoom/select
-            self.tbl_chev.item(row, 0).setData(Qt.UserRole + 1, r['fid'])
-            self.tbl_chev.item(row, 0).setData(Qt.UserRole + 2, r['layer_id'])
+            self.tbl_chev.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, r['fid'])
+            self.tbl_chev.item(row, 0).setData(Qt.ItemDataRole.UserRole + 2, r['layer_id'])
 
         self.tbl_chev.setSortingEnabled(True)
-        self.tbl_chev.sortByColumn(7, Qt.DescendingOrder)
+        self.tbl_chev.sortByColumn(7, Qt.SortOrder.DescendingOrder)
 
         n = len(results)
         self.lbl_cnt_chev.setText(f'{n} conflit(s)')
@@ -726,7 +739,7 @@ class QDRIPDialog(QDialog):
             'Recherche doublons…', 'Annuler', 0, len(feats), self)
         prog.setWindowTitle('Analyse en cours')
         prog.setMinimumDuration(0)
-        prog.setWindowModality(Qt.WindowModal)
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
 
         results  = []
         seen     = set()
@@ -818,12 +831,12 @@ class QDRIPDialog(QDialog):
                 item.setBackground(orange)
                 self.tbl_doub.setItem(row, col, item)
 
-            self.tbl_doub.item(row, 0).setData(Qt.UserRole + 1, r['fid1'])
-            self.tbl_doub.item(row, 0).setData(Qt.UserRole + 2, r['layer_id'])
-            self.tbl_doub.item(row, 4).setData(Qt.UserRole + 1, r['fid2'])
+            self.tbl_doub.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, r['fid1'])
+            self.tbl_doub.item(row, 0).setData(Qt.ItemDataRole.UserRole + 2, r['layer_id'])
+            self.tbl_doub.item(row, 4).setData(Qt.ItemDataRole.UserRole + 1, r['fid2'])
 
         self.tbl_doub.setSortingEnabled(True)
-        self.tbl_doub.sortByColumn(8, Qt.DescendingOrder)
+        self.tbl_doub.sortByColumn(8, Qt.SortOrder.DescendingOrder)
 
         n = len(results)
         self.lbl_cnt_doub.setText(f'{n} doublon(s)')
@@ -890,8 +903,8 @@ class QDRIPDialog(QDialog):
                 item.setBackground(blue)
                 self.tbl_parc.setItem(row, col, item)
 
-            self.tbl_parc.item(row, 0).setData(Qt.UserRole + 1, ft.id())
-            self.tbl_parc.item(row, 0).setData(Qt.UserRole + 2, lyr.id())
+            self.tbl_parc.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, ft.id())
+            self.tbl_parc.item(row, 0).setData(Qt.ItemDataRole.UserRole + 2, lyr.id())
 
         self.tbl_parc.setSortingEnabled(True)
         n = len(feats)
@@ -951,7 +964,7 @@ class QDRIPDialog(QDialog):
             'Analyse BAL isolées…', 'Annuler', 0, len(all_bal), self)
         prog.setWindowTitle('Analyse en cours')
         prog.setMinimumDuration(0)
-        prog.setWindowModality(Qt.WindowModal)
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
 
         results = []
 
@@ -1034,8 +1047,8 @@ class QDRIPDialog(QDialog):
                 item.setBackground(yellow)
                 self.tbl_bal.setItem(row, col, item)
 
-            self.tbl_bal.item(row, 0).setData(Qt.UserRole + 1, r['bal_fid'])
-            self.tbl_bal.item(row, 0).setData(Qt.UserRole + 2, r['bal_layer_id'])
+            self.tbl_bal.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, r['bal_fid'])
+            self.tbl_bal.item(row, 0).setData(Qt.ItemDataRole.UserRole + 2, r['bal_layer_id'])
 
         self.tbl_bal.setSortingEnabled(True)
 
@@ -1052,8 +1065,8 @@ class QDRIPDialog(QDialog):
         item = tbl.item(row, 0)
         if not item:
             return None, None
-        fid      = item.data(Qt.UserRole + 1)
-        layer_id = item.data(Qt.UserRole + 2)
+        fid      = item.data(Qt.ItemDataRole.UserRole + 1)
+        layer_id = item.data(Qt.ItemDataRole.UserRole + 2)
         if fid is None or layer_id is None:
             return None, None
         return QgsProject.instance().mapLayer(layer_id), fid
@@ -1109,9 +1122,9 @@ class QDRIPDialog(QDialog):
         item4 = self.tbl_doub.item(row, 4)
         if not item0:
             return
-        fid1     = item0.data(Qt.UserRole + 1)
-        layer_id = item0.data(Qt.UserRole + 2)
-        fid2     = item4.data(Qt.UserRole + 1) if item4 else None
+        fid1     = item0.data(Qt.ItemDataRole.UserRole + 1)
+        layer_id = item0.data(Qt.ItemDataRole.UserRole + 2)
+        fid2     = item4.data(Qt.ItemDataRole.UserRole + 1) if item4 else None
         lyr      = QgsProject.instance().mapLayer(layer_id) if layer_id else None
         if not lyr:
             return
@@ -1119,9 +1132,10 @@ class QDRIPDialog(QDialog):
         feats = list(lyr.getFeatures(QgsFeatureRequest().setFilterFids(fids)))
         if not feats:
             return
-        from functools import reduce
-        bbox = reduce(lambda a, b: a.combineExtentWith(b),
-                      [ft.geometry().boundingBox() for ft in feats])
+        boxes = [ft.geometry().boundingBox() for ft in feats]
+        bbox = QgsRectangle(boxes[0])
+        for _b in boxes[1:]:
+            bbox.combineExtentWith(_b)
         pad  = max(bbox.width() * 0.15, bbox.height() * 0.15, 50.0)
         bbox.grow(pad)
         iface.mapCanvas().setExtent(bbox)
@@ -1141,9 +1155,9 @@ class QDRIPDialog(QDialog):
         item4 = self.tbl_doub.item(row, 4)
         if not item0:
             return
-        fid1     = item0.data(Qt.UserRole + 1)
-        layer_id = item0.data(Qt.UserRole + 2)
-        fid2     = item4.data(Qt.UserRole + 1) if item4 else None
+        fid1     = item0.data(Qt.ItemDataRole.UserRole + 1)
+        layer_id = item0.data(Qt.ItemDataRole.UserRole + 2)
+        fid2     = item4.data(Qt.ItemDataRole.UserRole + 1) if item4 else None
         lyr      = QgsProject.instance().mapLayer(layer_id) if layer_id else None
         if not lyr:
             return
