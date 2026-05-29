@@ -221,7 +221,7 @@ class QDRIPDialog(QDialog):
         grp_exist = QGroupBox('Couches existantes')
         gl = QVBoxLayout(grp_exist)
 
-        def _exist_row(label, cb_attr, checked=True):
+        def _exist_row(label, checked=True):
             row = QHBoxLayout()
             chk = QCheckBox(label)
             chk.setChecked(checked)
