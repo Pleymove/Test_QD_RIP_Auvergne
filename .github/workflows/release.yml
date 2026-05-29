@@ -1,0 +1,23 @@
+name: Build & publish QGIS plugin
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Zip plugin folder
+        run: zip -r QD_RIP_Auvergne_QC.zip QD_RIP_Auvergne_QC -x "*.pyc" "*/__pycache__/*"
+
+      - name: Upload zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: QD_RIP_Auvergne_QC.zip
