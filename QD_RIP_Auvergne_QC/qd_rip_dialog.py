@@ -8,6 +8,10 @@ Onglets :
 """
 
 import csv
+import os
+import tempfile
+import datetime
+from collections import Counter
 
 from qgis.PyQt.QtWidgets import (
     QDialog, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
@@ -17,8 +21,8 @@ from qgis.PyQt.QtWidgets import (
     QApplication, QAbstractItemView, QFileDialog, QFrame,
     QSplitter, QPlainTextEdit, QDialogButtonBox,
 )
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QColor, QBrush, QFont
+from qgis.PyQt.QtCore import Qt, QUrl
+from qgis.PyQt.QtGui import QColor, QBrush, QFont, QDesktopServices
 
 from qgis.core import (
     QgsProject, QgsSpatialIndex, QgsFeatureRequest, QgsRectangle,
@@ -163,6 +167,14 @@ class QDRIPDialog(QDialog):
         bar = QHBoxLayout()
         self.lbl_status = QLabel('Prêt.')
         bar.addWidget(self.lbl_status, 1)
+        btn_report = QPushButton('📊  Générer Rapport')
+        btn_report.setToolTip(
+            'Générer un rapport HTML de synthèse avec les résultats\n'
+            'des analyses lancées (chevauchements, doublons, parcours, BAL).'
+        )
+        btn_report.setStyleSheet('font-weight:bold; padding:5px 10px;')
+        btn_report.clicked.connect(self._generate_report)
+        bar.addWidget(btn_report)
         btn_close = QPushButton('Fermer')
         btn_close.clicked.connect(self.close)
         bar.addWidget(btn_close)
@@ -298,8 +310,8 @@ class QDRIPDialog(QDialog):
             gl.addLayout(r2)
             return chk, cb, le
 
-        self.chk_ft,   self.cb_ft,   self.le_ft_filter   = _exist_row('ft_arciti')
-        self.chk_bt,   self.cb_bt,   self.le_bt_filter   = _exist_row('bt')
+        self.chk_ft,   self.cb_ft,   self.le_ft_filter   = _exist_row('ft_arciti', '"cm_avct" != \'E4\'')
+        self.chk_bt,   self.cb_bt,   self.le_bt_filter   = _exist_row('bt', '"type_de_lien" != \'Câble\'')
         self.chk_athd, self.cb_athd, self.le_athd_filter = _exist_row('athd_artere', '"dispopp_ar" != 0')
         self.chk_chemi, self.cb_chemi, self.le_chemi_filter = _exist_row(
             't_cheminement',
@@ -1256,3 +1268,549 @@ class QDRIPDialog(QDialog):
             QMessageBox.information(self, 'Export', f'Fichier exporté :\n{path}')
         except Exception as e:
             QMessageBox.critical(self, 'Erreur export', str(e))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # REPORT GENERATION
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _collect_table_data(self, tbl):
+        """Return visible rows as list of dicts keyed by column headers."""
+        if tbl.rowCount() == 0:
+            return []
+        headers = [
+            (tbl.horizontalHeaderItem(c).text() if tbl.horizontalHeaderItem(c) else f'Col{c}')
+            for c in range(tbl.columnCount())
+        ]
+        rows = []
+        for row in range(tbl.rowCount()):
+            if tbl.isRowHidden(row):
+                continue
+            rows.append({
+                headers[c]: (tbl.item(row, c).text() if tbl.item(row, c) else '')
+                for c in range(tbl.columnCount())
+            })
+        return rows
+
+    def _make_charts(self, chev, doub, parc, bal):
+        """Generate base64-encoded PNG charts via matplotlib. Returns dict of name→data URI."""
+        charts = {}
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from io import BytesIO
+            import base64
+
+            COLORS = ['#1a6faf', '#3498db', '#5dade2', '#85c1e9', '#aed6f1']
+            BG = '#f8f9fa'
+
+            def _fig_to_uri(fig):
+                buf = BytesIO()
+                fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                            facecolor=BG, edgecolor='none')
+                buf.seek(0)
+                enc = base64.b64encode(buf.read()).decode()
+                plt.close(fig)
+                return f'data:image/png;base64,{enc}'
+
+            # ── Chart 1: Chevauchements by conflicting layer ──────────────────
+            if chev:
+                cnt = Counter(r.get('Couche conf.', '—') for r in chev)
+                labels = list(cnt.keys())
+                vals   = list(cnt.values())
+                fig, ax = plt.subplots(figsize=(7, max(2, len(labels) * 0.5 + 1)))
+                fig.patch.set_facecolor(BG)
+                ax.set_facecolor(BG)
+                bars = ax.barh(labels, vals, color=COLORS[:len(labels)], height=0.55)
+                ax.bar_label(bars, padding=4, fontsize=9)
+                ax.set_xlabel('Nombre de conflits', fontsize=9)
+                ax.set_title('Conflits par couche existante', fontsize=11, fontweight='bold', pad=10)
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.tick_params(labelsize=9)
+                plt.tight_layout()
+                charts['chev_layers'] = _fig_to_uri(fig)
+
+            # ── Chart 2: Overlap length distribution ─────────────────────────
+            if chev:
+                lengths = []
+                for r in chev:
+                    try:
+                        lengths.append(float(r.get('Chevauch. (m)', '0').replace(',', '.')))
+                    except ValueError:
+                        pass
+                if lengths:
+                    fig, ax = plt.subplots(figsize=(7, 3.5))
+                    fig.patch.set_facecolor(BG)
+                    ax.set_facecolor(BG)
+                    ax.hist(lengths, bins=20, color=COLORS[0], edgecolor='white', linewidth=0.5)
+                    ax.set_xlabel('Longueur de chevauchement (m)', fontsize=9)
+                    ax.set_ylabel('Fréquence', fontsize=9)
+                    ax.set_title('Distribution des longueurs de chevauchement', fontsize=11,
+                                 fontweight='bold', pad=10)
+                    ax.spines['top'].set_visible(False)
+                    ax.spines['right'].set_visible(False)
+                    ax.tick_params(labelsize=9)
+                    plt.tight_layout()
+                    charts['chev_hist'] = _fig_to_uri(fig)
+
+            # ── Chart 3: Top 10 longest parcours ─────────────────────────────
+            if parc:
+                top10 = parc[:10]
+                labels = [r.get('id_pa', r.get('ID', f'#{i}')) for i, r in enumerate(top10)]
+                vals   = []
+                for r in top10:
+                    try:
+                        vals.append(float(r.get('Long. (m)', '0').replace(',', '.')))
+                    except ValueError:
+                        vals.append(0.0)
+                fig, ax = plt.subplots(figsize=(7, max(2.5, len(labels) * 0.55 + 1)))
+                fig.patch.set_facecolor(BG)
+                ax.set_facecolor(BG)
+                bars = ax.barh(labels[::-1], vals[::-1], color=COLORS[1], height=0.55)
+                ax.bar_label(bars, fmt='%.1f m', padding=4, fontsize=8)
+                ax.set_xlabel('Longueur (m)', fontsize=9)
+                ax.set_title('Top 10 des parcours les plus longs', fontsize=11,
+                             fontweight='bold', pad=10)
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.tick_params(labelsize=9)
+                plt.tight_layout()
+                charts['parc_top10'] = _fig_to_uri(fig)
+
+            # ── Chart 4: BAL isolation distances ─────────────────────────────
+            if bal:
+                dists = []
+                for r in bal:
+                    try:
+                        v = r.get('Dist. infra (m)', 'N/A')
+                        if v != 'N/A':
+                            dists.append(float(v.replace(',', '.')))
+                    except ValueError:
+                        pass
+                if dists:
+                    fig, ax = plt.subplots(figsize=(7, 3.5))
+                    fig.patch.set_facecolor(BG)
+                    ax.set_facecolor(BG)
+                    ax.hist(dists, bins=15, color='#e67e22', edgecolor='white', linewidth=0.5)
+                    ax.set_xlabel('Distance à l\'infra C0 la plus proche (m)', fontsize=9)
+                    ax.set_ylabel('Nombre de BAL', fontsize=9)
+                    ax.set_title('Distribution des distances BAL isolées → Infra C0', fontsize=11,
+                                 fontweight='bold', pad=10)
+                    ax.spines['top'].set_visible(False)
+                    ax.spines['right'].set_visible(False)
+                    ax.tick_params(labelsize=9)
+                    plt.tight_layout()
+                    charts['bal_dist'] = _fig_to_uri(fig)
+
+        except Exception:
+            pass
+        return charts
+
+    def _build_report_html(self, chev, doub, parc, bal, charts):
+        """Assemble the full HTML report string."""
+        now = datetime.datetime.now().strftime('%d/%m/%Y à %H:%M')
+
+        # Key figures
+        n_chev = len(chev)
+        n_doub = len(doub)
+        n_parc = len(parc)
+        n_bal  = len(bal)
+
+        total_ov_chev = 0.0
+        for r in chev:
+            try:
+                total_ov_chev += float(r.get('Chevauch. (m)', '0').replace(',', '.'))
+            except ValueError:
+                pass
+
+        total_ov_doub = 0.0
+        for r in doub:
+            try:
+                total_ov_doub += float(r.get('Chevauch. (m)', '0').replace(',', '.'))
+            except ValueError:
+                pass
+
+        total_len_parc = 0.0
+        for r in parc:
+            try:
+                total_len_parc += float(r.get('Long. (m)', '0').replace(',', '.'))
+            except ValueError:
+                pass
+
+        pm_info = (f'{len(self._pm_set)} PM' if self.chk_pm.isChecked() and self._pm_set
+                   else 'Aucun filtre PM')
+
+        def _kpi(value, label, color='#1a6faf', sub=''):
+            return f'''
+            <div class="kpi">
+                <div class="kpi-value" style="color:{color}">{value}</div>
+                <div class="kpi-label">{label}</div>
+                {f'<div class="kpi-sub">{sub}</div>' if sub else ''}
+            </div>'''
+
+        def _chart(key, caption=''):
+            if key not in charts:
+                return ''
+            return f'''
+            <figure class="chart">
+                <img src="{charts[key]}" alt="{caption}">
+                {f'<figcaption>{caption}</figcaption>' if caption else ''}
+            </figure>'''
+
+        def _table_html(data, max_rows=50):
+            if not data:
+                return '<p class="empty">Aucune donnée disponible.</p>'
+            headers = list(data[0].keys())
+            rows_html = ''
+            for r in data[:max_rows]:
+                cells = ''.join(f'<td>{r.get(h, "")}</td>' for h in headers)
+                rows_html += f'<tr>{cells}</tr>'
+            if len(data) > max_rows:
+                rows_html += (
+                    f'<tr><td colspan="{len(headers)}" class="more">'
+                    f'… et {len(data) - max_rows} ligne(s) supplémentaire(s) — '
+                    f'voir export CSV pour la liste complète.</td></tr>'
+                )
+            head = ''.join(f'<th>{h}</th>' for h in headers)
+            return f'<table><thead><tr>{head}</tr></thead><tbody>{rows_html}</tbody></table>'
+
+        chev_section = ''
+        if chev or n_chev == 0:
+            layer_cnt = Counter(r.get('Couche conf.', '—') for r in chev)
+            layer_pills = ' '.join(
+                f'<span class="pill">{k}: <strong>{v}</strong></span>'
+                for k, v in layer_cnt.most_common()
+            )
+            chev_section = f'''
+            <section>
+                <h2>⚠ Chevauchements C0 / Existant</h2>
+                <div class="kpi-row">
+                    {_kpi(n_chev, 'Conflits détectés',
+                          '#c0392b' if n_chev > 0 else '#27ae60')}
+                    {_kpi(f'{total_ov_chev:,.1f} m', 'Cumul chevauch.')}
+                </div>
+                {'<div class="pills">' + layer_pills + '</div>' if layer_pills else ''}
+                {_chart('chev_layers', 'Répartition des conflits par couche existante')}
+                {_chart('chev_hist', 'Distribution des longueurs de chevauchement')}
+                <h3>Détail des conflits</h3>
+                {_table_html(chev)}
+            </section>'''
+
+        doub_section = ''
+        if doub or n_doub == 0:
+            doub_section = f'''
+            <section>
+                <h2>⛔ Doublons Infra</h2>
+                <div class="kpi-row">
+                    {_kpi(n_doub, 'Paires en doublon',
+                          '#c0392b' if n_doub > 0 else '#27ae60')}
+                    {_kpi(f'{total_ov_doub:,.1f} m', 'Cumul superposition')}
+                </div>
+                <h3>Détail des doublons</h3>
+                {_table_html(doub)}
+            </section>'''
+
+        parc_section = ''
+        if parc or n_parc == 0:
+            parc_section = f'''
+            <section>
+                <h2>📏 Parcours les plus longs</h2>
+                <div class="kpi-row">
+                    {_kpi(n_parc, 'Parcours listés')}
+                    {_kpi(f'{total_len_parc:,.0f} m', 'Longueur totale')}
+                </div>
+                {_chart('parc_top10', 'Top 10 des parcours les plus longs')}
+                <h3>Liste des parcours</h3>
+                {_table_html(parc)}
+            </section>'''
+
+        bal_section = ''
+        if bal or n_bal == 0:
+            avg_dist = ''
+            dists = []
+            for r in bal:
+                try:
+                    v = r.get('Dist. infra (m)', 'N/A')
+                    if v != 'N/A':
+                        dists.append(float(v.replace(',', '.')))
+                except ValueError:
+                    pass
+            if dists:
+                avg_dist = f'{sum(dists)/len(dists):,.1f} m'
+            bal_section = f'''
+            <section>
+                <h2>📍 BAL Isolées</h2>
+                <div class="kpi-row">
+                    {_kpi(n_bal, 'BAL isolées',
+                          '#c0392b' if n_bal > 0 else '#27ae60')}
+                    {_kpi(avg_dist or "—", "Distance moy. à l'infra")}
+                </div>
+                {_chart('bal_dist', 'Distribution des distances BAL → Infra C0')}
+                <h3>Liste des BAL isolées</h3>
+                {_table_html(bal)}
+            </section>'''
+
+        no_data_warn = ''
+        if not (chev or doub or parc or bal):
+            no_data_warn = '''
+            <div class="warn">
+                Aucune analyse n'a encore été lancée. Veuillez exécuter les analyses
+                depuis les différents onglets puis régénérer le rapport.
+            </div>'''
+
+        html = f'''<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rapport QD RIP Auvergne — {now}</title>
+<style>
+  :root {{
+    --primary: #1a6faf;
+    --primary-light: #3498db;
+    --accent: #e67e22;
+    --danger: #c0392b;
+    --success: #27ae60;
+    --bg: #f8f9fa;
+    --card-bg: #ffffff;
+    --border: #dee2e6;
+    --text: #212529;
+    --muted: #6c757d;
+  }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+  }}
+  header {{
+    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+    color: white;
+    padding: 32px 40px;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }}
+  header h1 {{
+    font-size: 26px;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }}
+  header .subtitle {{
+    font-size: 14px;
+    opacity: 0.85;
+  }}
+  header .meta {{
+    margin-top: 12px;
+    font-size: 12px;
+    opacity: 0.75;
+    display: flex;
+    gap: 24px;
+  }}
+  main {{ max-width: 1100px; margin: 32px auto; padding: 0 24px; }}
+  .warn {{
+    background: #fff3cd;
+    border-left: 4px solid #ffc107;
+    padding: 14px 18px;
+    border-radius: 4px;
+    margin-bottom: 24px;
+  }}
+  section {{
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 32px;
+    box-shadow: 0 2px 4px rgba(0,0,0,.06);
+  }}
+  section h2 {{
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--primary);
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 10px;
+    margin-bottom: 18px;
+  }}
+  section h3 {{
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin: 20px 0 10px;
+  }}
+  .kpi-row {{
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+  }}
+  .kpi {{
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 24px;
+    min-width: 140px;
+    text-align: center;
+  }}
+  .kpi-value {{
+    font-size: 28px;
+    font-weight: 800;
+    line-height: 1.1;
+  }}
+  .kpi-label {{
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }}
+  .kpi-sub {{ font-size: 11px; color: var(--muted); margin-top: 2px; }}
+  .pills {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }}
+  .pill {{
+    background: #e8f4f8;
+    border: 1px solid #b8dff0;
+    border-radius: 20px;
+    padding: 4px 12px;
+    font-size: 12px;
+    color: var(--primary);
+  }}
+  figure.chart {{
+    margin: 16px 0;
+    text-align: center;
+  }}
+  figure.chart img {{
+    max-width: 100%;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+  }}
+  figcaption {{
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 6px;
+    font-style: italic;
+  }}
+  table {{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }}
+  thead th {{
+    background: var(--primary);
+    color: white;
+    padding: 8px 10px;
+    text-align: left;
+    font-weight: 600;
+    white-space: nowrap;
+  }}
+  tbody tr:nth-child(even) {{ background: #f0f4f8; }}
+  tbody tr:hover {{ background: #dbeafe; }}
+  tbody td {{
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }}
+  .more {{ color: var(--muted); font-style: italic; text-align: center; }}
+  p.empty {{ color: var(--muted); font-style: italic; }}
+  footer {{
+    text-align: center;
+    padding: 24px;
+    color: var(--muted);
+    font-size: 12px;
+    border-top: 1px solid var(--border);
+    margin-top: 24px;
+  }}
+  @media print {{
+    body {{ font-size: 11px; }}
+    header {{ padding: 20px; }}
+    section {{ break-inside: avoid; box-shadow: none; }}
+    main {{ margin: 16px; padding: 0; max-width: none; }}
+  }}
+</style>
+</head>
+<body>
+<header>
+  <h1>Rapport de Contrôle Qualité — RIP Auvergne</h1>
+  <div class="subtitle">Analyse de la conformité des données fibre optique C0</div>
+  <div class="meta">
+    <span>📅 Généré le {now}</span>
+    <span>🗺 Périmètre : {pm_info}</span>
+    <span>🔧 Plugin QD RIP Auvergne v1.0.6</span>
+  </div>
+</header>
+<main>
+{no_data_warn}
+<section>
+  <h2>Synthèse générale</h2>
+  <div class="kpi-row">
+    {_kpi(n_chev, 'Chevauchements',
+          '#c0392b' if n_chev > 0 else '#27ae60',
+          f'{total_ov_chev:,.1f} m cumulés')}
+    {_kpi(n_doub, 'Doublons',
+          '#c0392b' if n_doub > 0 else '#27ae60',
+          f'{total_ov_doub:,.1f} m cumulés')}
+    {_kpi(n_parc, 'Parcours listés', '#1a6faf',
+          f'{total_len_parc:,.0f} m total')}
+    {_kpi(n_bal, 'BAL isolées',
+          '#c0392b' if n_bal > 0 else '#27ae60')}
+  </div>
+</section>
+{chev_section}
+{doub_section}
+{parc_section}
+{bal_section}
+</main>
+<footer>
+  Rapport généré par le plugin <strong>QD RIP Auvergne</strong> — Pleymove
+  &nbsp;|&nbsp; {now}
+  &nbsp;|&nbsp; Pour imprimer en PDF : Fichier → Imprimer → Enregistrer en PDF
+</footer>
+</body>
+</html>'''
+        return html
+
+    def _generate_report(self):
+        """Collect analysis results, build HTML report and open in browser."""
+        chev = self._collect_table_data(self.tbl_chev)
+        doub = self._collect_table_data(self.tbl_doub)
+        parc = self._collect_table_data(self.tbl_parc)
+        bal  = self._collect_table_data(self.tbl_bal)
+
+        if not (chev or doub or parc or bal):
+            ans = QMessageBox.question(
+                self, 'Rapport — aucune donnée',
+                'Aucune analyse n\'a encore été lancée.\n\n'
+                'Générer un rapport vide à titre d\'illustration ?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+
+        self.lbl_status.setText('Génération du rapport…')
+        QApplication.processEvents()
+
+        charts = self._make_charts(chev, doub, parc, bal)
+        html   = self._build_report_html(chev, doub, parc, bal, charts)
+
+        # Ask where to save
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Enregistrer le rapport HTML',
+            f'rapport_qd_rip_{datetime.datetime.now().strftime("%Y%m%d_%H%M")}.html',
+            'Rapport HTML (*.html)',
+        )
+        if not path:
+            self.lbl_status.setText('Rapport annulé.')
+            return
+
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(html)
+        except Exception as e:
+            QMessageBox.critical(self, 'Erreur', f'Impossible d\'écrire le fichier :\n{e}')
+            self.lbl_status.setText('Erreur export rapport.')
+            return
+
+        self.lbl_status.setText(f'Rapport enregistré : {os.path.basename(path)}')
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
