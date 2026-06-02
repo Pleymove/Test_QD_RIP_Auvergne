@@ -19,7 +19,7 @@ from qgis.PyQt.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
     QGroupBox, QFormLayout, QProgressDialog, QMessageBox,
     QApplication, QAbstractItemView, QFileDialog, QFrame,
-    QSplitter, QPlainTextEdit, QDialogButtonBox,
+    QSplitter, QPlainTextEdit, QDialogButtonBox, QTextBrowser,
 )
 from qgis.PyQt.QtCore import Qt, QUrl
 from qgis.PyQt.QtGui import QColor, QBrush, QFont, QDesktopServices
@@ -162,6 +162,7 @@ class QDRIPDialog(QDialog):
         self.tabs.addTab(self._tab_doublons(),       '⛔  Doublons Infra')
         self.tabs.addTab(self._tab_parcours(),       '📏  Parcours les plus longs')
         self.tabs.addTab(self._tab_bal(),            '📍  BAL Isolées')
+        self.tabs.addTab(self._tab_rapport(),        '📊  Tableau de bord')
         root.addWidget(self.tabs)
 
         bar = QHBoxLayout()
@@ -777,6 +778,7 @@ class QDRIPDialog(QDialog):
         self.lbl_cnt_chev.setText(f'{n} conflit(s)')
         self.lbl_status.setText(
             f'Chevauchements : {n} conflit(s) sur {len(c0_feats)} entités C0.')
+        self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
     # ANALYSIS – Tab 2: Doublons
@@ -914,6 +916,7 @@ class QDRIPDialog(QDialog):
         self.lbl_cnt_doub.setText(f'{n} doublon(s)')
         self.lbl_status.setText(
             f'Doublons : {n} paire(s) sur {len(feats)} entités.')
+        self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
     # ANALYSIS – Tab 3: Parcours les plus longs
@@ -981,6 +984,7 @@ class QDRIPDialog(QDialog):
         n = len(feats)
         self.lbl_cnt_parc.setText(f'{n} parcours')
         self.lbl_status.setText(f'Parcours chargés : {n} (top {top_n}).')
+        self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
     # ANALYSIS – Tab 4: BAL Isolées
@@ -1128,6 +1132,7 @@ class QDRIPDialog(QDialog):
         self.lbl_cnt_bal.setText(f'{n} BAL isolée(s)')
         self.lbl_status.setText(
             f'BAL isolées : {n} sur {len(all_bal)} BAL totales.')
+        self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
     # ACTIONS – Zoom / Select / Flash / Export
@@ -1268,6 +1273,224 @@ class QDRIPDialog(QDialog):
             QMessageBox.information(self, 'Export', f'Fichier exporté :\n{path}')
         except Exception as e:
             QMessageBox.critical(self, 'Erreur export', str(e))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 5 – Tableau de bord (in-app live report)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _tab_rapport(self):
+        root = QWidget()
+        v = QVBoxLayout(root)
+        v.setContentsMargins(8, 8, 8, 8)
+
+        bar = QHBoxLayout()
+        self.lbl_rapport_time = QLabel(
+            'Lancez une analyse pour actualiser automatiquement ce tableau de bord.'
+        )
+        self.lbl_rapport_time.setStyleSheet('color: gray; font-style: italic; font-size: 11px;')
+        bar.addWidget(self.lbl_rapport_time, 1)
+        btn_refresh = QPushButton('🔄  Actualiser')
+        btn_refresh.setToolTip('Recalcule le tableau de bord avec les résultats actuels.')
+        btn_refresh.clicked.connect(self._refresh_rapport_tab)
+        bar.addWidget(btn_refresh)
+        v.addLayout(bar)
+
+        self.tb_rapport = QTextBrowser()
+        self.tb_rapport.setOpenExternalLinks(False)
+        self.tb_rapport.setHtml(
+            '<html><body style="font-family:Arial,sans-serif; color:#888888; padding:24px;">'
+            '<p style="font-size:13px;">Aucune analyse disponible.<br/>'
+            'Lancez les analyses dans les onglets précédents, le tableau de bord '
+            's\'actualisera automatiquement.</p></body></html>'
+        )
+        v.addWidget(self.tb_rapport)
+
+        return root
+
+    def _refresh_rapport_tab(self):
+        """Rebuild the in-app dashboard with the latest results from all analysis tabs."""
+        if not hasattr(self, 'tb_rapport'):
+            return
+        chev = self._collect_table_data(self.tbl_chev)
+        doub = self._collect_table_data(self.tbl_doub)
+        parc = self._collect_table_data(self.tbl_parc)
+        bal  = self._collect_table_data(self.tbl_bal)
+        charts = self._make_charts(chev, doub, parc, bal)
+        self.tb_rapport.setHtml(self._build_tab_html(chev, doub, parc, bal, charts))
+        now = datetime.datetime.now().strftime('%H:%M:%S')
+        self.lbl_rapport_time.setText(f'Dernière actualisation : {now}')
+        self.lbl_rapport_time.setStyleSheet('font-size: 11px;')
+
+    def _build_tab_html(self, chev, doub, parc, bal, charts):
+        """Build QTextBrowser-compatible HTML for the in-app dashboard."""
+        now = datetime.datetime.now().strftime('%d/%m/%Y à %H:%M')
+
+        n_chev = len(chev)
+        n_doub = len(doub)
+        n_parc = len(parc)
+        n_bal  = len(bal)
+
+        total_ov_chev = 0.0
+        for r in chev:
+            try:
+                total_ov_chev += float(r.get('Chevauch. (m)', '0').replace(',', '.'))
+            except ValueError:
+                pass
+
+        total_ov_doub = 0.0
+        for r in doub:
+            try:
+                total_ov_doub += float(r.get('Chevauch. (m)', '0').replace(',', '.'))
+            except ValueError:
+                pass
+
+        total_len_parc = 0.0
+        for r in parc:
+            try:
+                total_len_parc += float(r.get('Long. (m)', '0').replace(',', '.'))
+            except ValueError:
+                pass
+
+        avg_dist_bal = ''
+        bal_dists = []
+        for r in bal:
+            try:
+                v = r.get('Dist. infra (m)', 'N/A')
+                if v != 'N/A':
+                    bal_dists.append(float(v.replace(',', '.')))
+            except ValueError:
+                pass
+        if bal_dists:
+            avg_dist_bal = f'{sum(bal_dists)/len(bal_dists):,.1f} m'
+
+        pm_info = (f'{len(self._pm_set)} PM'
+                   if self.chk_pm.isChecked() and self._pm_set else 'Aucun filtre PM')
+
+        def _c(n):
+            return '#c0392b' if n > 0 else '#27ae60'
+
+        # KPI box (table-cell based, QTextBrowser-safe)
+        def _kpi(val, label, color='#1a6faf', sub=''):
+            sub_html = (f'<br/><span style="font-size:10px; color:#aaaaaa;">{sub}</span>'
+                        if sub else '')
+            return (
+                f'<td style="padding:5px; width:25%;">'
+                f'<table width="100%" cellspacing="0" cellpadding="8">'
+                f'<tr><td style="background-color:white; border:1px solid #dee2e6; '
+                f'border-radius:6px; text-align:center;">'
+                f'<span style="font-size:22px; font-weight:bold; color:{color};">{val}</span><br/>'
+                f'<span style="font-size:10px; color:#888888;">{label}</span>'
+                f'{sub_html}'
+                f'</td></tr></table></td>'
+            )
+
+        def _section(icon, title, color, body):
+            return (
+                f'<table width="100%" cellspacing="0" cellpadding="0" '
+                f'style="margin-bottom:12px;">'
+                f'<tr><td style="background-color:white; border:1px solid #dee2e6; '
+                f'border-radius:8px; padding:14px;">'
+                f'<p style="font-size:14px; font-weight:bold; color:{color}; '
+                f'border-bottom:1px solid #dee2e6; padding-bottom:6px; margin:0 0 10px 0;">'
+                f'{icon} {title}</p>'
+                f'{body}'
+                f'</td></tr></table>'
+            )
+
+        def _img(key):
+            if key not in charts:
+                return ''
+            return (f'<p><img src="{charts[key]}" width="680" '
+                    f'style="border:1px solid #dee2e6; border-radius:4px;"/></p>')
+
+        def _pill(text):
+            return (f'<span style="background-color:#e8f4f8; border:1px solid #b8dff0; '
+                    f'border-radius:10px; padding:2px 8px; font-size:11px; '
+                    f'color:#1a6faf; margin-right:4px;">{text}</span>')
+
+        # ── Synthèse ──────────────────────────────────────────────────────────
+        synthese = _section('📋', 'Synthèse générale', '#1a6faf',
+            f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
+            f'{_kpi(n_chev, "Chevauchements", _c(n_chev), f"{total_ov_chev:,.1f} m")}'
+            f'{_kpi(n_doub, "Doublons", _c(n_doub), f"{total_ov_doub:,.1f} m")}'
+            f'{_kpi(n_parc, "Parcours listés", "#1a6faf", f"{total_len_parc:,.0f} m total")}'
+            f'{_kpi(n_bal, "BAL isolées", _c(n_bal), avg_dist_bal or "—")}'
+            f'</tr></table>'
+        )
+
+        # ── Chevauchements ────────────────────────────────────────────────────
+        layer_cnt = Counter(r.get('Couche conf.', '—') for r in chev)
+        pills_html = ''.join(_pill(f'{k}: <b>{v}</b>') for k, v in layer_cnt.most_common())
+        chev_body = (
+            f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
+            f'{_kpi(n_chev, "Conflits détectés", _c(n_chev))}'
+            f'{_kpi(f"{total_ov_chev:,.1f} m", "Cumul chevauchement")}'
+            f'<td></td><td></td>'
+            f'</tr></table>'
+            + (f'<p style="margin:8px 0;">{pills_html}</p>' if pills_html else '')
+            + _img('chev_layers')
+            + _img('chev_hist')
+        )
+        chev_section = _section('⚠', 'Chevauchements C0 / Existant', '#c0392b', chev_body)
+
+        # ── Doublons ──────────────────────────────────────────────────────────
+        doub_body = (
+            f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
+            f'{_kpi(n_doub, "Paires en doublon", _c(n_doub))}'
+            f'{_kpi(f"{total_ov_doub:,.1f} m", "Cumul superposition")}'
+            f'<td></td><td></td>'
+            f'</tr></table>'
+        )
+        doub_section = _section('⛔', 'Doublons Infra', '#c0392b', doub_body)
+
+        # ── Parcours ──────────────────────────────────────────────────────────
+        parc_body = (
+            f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
+            f'{_kpi(n_parc, "Parcours listés", "#1a6faf")}'
+            f'{_kpi(f"{total_len_parc:,.0f} m", "Longueur totale")}'
+            f'<td></td><td></td>'
+            f'</tr></table>'
+            + _img('parc_top10')
+        )
+        parc_section = _section('📏', 'Parcours les plus longs', '#1a6faf', parc_body)
+
+        # ── BAL ───────────────────────────────────────────────────────────────
+        bal_body = (
+            f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
+            f'{_kpi(n_bal, "BAL isolées", _c(n_bal))}'
+            f'{_kpi(avg_dist_bal or "—", "Distance moy. à infra")}'
+            f'<td></td><td></td>'
+            f'</tr></table>'
+            + _img('bal_dist')
+        )
+        bal_section = _section('📍', 'BAL Isolées', '#e67e22', bal_body)
+
+        return (
+            '<!DOCTYPE html><html><head><meta charset="UTF-8"></head>'
+            '<body style="background-color:#f8f9fa; font-family:Arial,sans-serif; '
+            'color:#212529; margin:0; padding:10px;">'
+
+            # Header
+            '<table width="100%" cellspacing="0" cellpadding="0" '
+            'style="margin-bottom:12px;">'
+            '<tr><td style="background-color:#1a6faf; color:white; '
+            'border-radius:6px; padding:14px 16px;">'
+            '<span style="font-size:16px; font-weight:bold;">Tableau de bord — QD RIP Auvergne</span><br/>'
+            f'<span style="font-size:11px; color:#cce4f7;">'
+            f'Actualisé le {now} &nbsp;·&nbsp; Périmètre : {pm_info}</span>'
+            '</td></tr></table>'
+
+            + synthese
+            + chev_section
+            + doub_section
+            + parc_section
+            + bal_section
+
+            + '<p style="font-size:10px; color:#aaaaaa; text-align:center; margin-top:8px;">'
+            'Plugin QD RIP Auvergne v1.0.8 — Pleymove</p>'
+            '</body></html>'
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # REPORT GENERATION
@@ -1741,7 +1964,7 @@ class QDRIPDialog(QDialog):
   <div class="meta">
     <span>📅 Généré le {now}</span>
     <span>🗺 Périmètre : {pm_info}</span>
-    <span>🔧 Plugin QD RIP Auvergne v1.0.6</span>
+    <span>🔧 Plugin QD RIP Auvergne v1.0.8</span>
   </div>
 </header>
 <main>
@@ -1767,7 +1990,7 @@ class QDRIPDialog(QDialog):
 {bal_section}
 </main>
 <footer>
-  Rapport généré par le plugin <strong>QD RIP Auvergne</strong> — Pleymove
+  Rapport généré par le plugin <strong>QD RIP Auvergne v1.0.8</strong> — Pleymove
   &nbsp;|&nbsp; {now}
   &nbsp;|&nbsp; Pour imprimer en PDF : Fichier → Imprimer → Enregistrer en PDF
 </footer>
