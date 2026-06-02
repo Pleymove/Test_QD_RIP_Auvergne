@@ -15,7 +15,7 @@ from qgis.PyQt.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
     QGroupBox, QFormLayout, QProgressDialog, QMessageBox,
     QApplication, QAbstractItemView, QFileDialog, QFrame,
-    QSplitter,
+    QSplitter, QPlainTextEdit, QDialogButtonBox,
 )
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor, QBrush, QFont
@@ -25,6 +25,8 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapLayerComboBox
 from qgis.utils import iface
+
+from .pm_perimeter import DEFAULT_PM_CODES
 
 # Resolution du filtre de couche, compatible QGIS 3.16 -> 4.x
 try:
@@ -80,6 +82,8 @@ class QDRIPDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._pm_codes = list(DEFAULT_PM_CODES)
+        self._pm_set = set(self._pm_codes)
         self.setWindowTitle('QD RIP Auvergne — Contrôle Qualité')
         self.setMinimumSize(980, 700)
         self.resize(1200, 800)
@@ -131,6 +135,24 @@ class QDRIPDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
 
+        # ── Périmètre PM (s'applique à toutes les analyses) ──
+        pm_bar = QHBoxLayout()
+        self.chk_pm = QCheckBox('Restreindre au périmètre PM')
+        self.chk_pm.setChecked(True)
+        self.chk_pm.setToolTip(
+            'Si coché, seules les entités dont le champ "sro" figure\n'
+            'dans la liste de PM sont analysées (toutes les analyses).'
+        )
+        pm_bar.addWidget(self.chk_pm)
+        self.lbl_pm = QLabel()
+        pm_bar.addWidget(self.lbl_pm)
+        btn_pm = QPushButton('Modifier la liste…')
+        btn_pm.clicked.connect(self._edit_pm_list)
+        pm_bar.addWidget(btn_pm)
+        pm_bar.addStretch()
+        root.addLayout(pm_bar)
+        self._refresh_pm_label()
+
         self.tabs = QTabWidget()
         self.tabs.addTab(self._tab_chevauchement(), '⚠  Chevauchements C0 / Existant')
         self.tabs.addTab(self._tab_doublons(),       '⛔  Doublons Infra')
@@ -145,6 +167,39 @@ class QDRIPDialog(QDialog):
         btn_close.clicked.connect(self.close)
         bar.addWidget(btn_close)
         root.addLayout(bar)
+
+    # ─── périmètre PM ─────────────────────────────────────────────────────────
+
+    def _refresh_pm_label(self):
+        self.lbl_pm.setText(f'({len(self._pm_set)} PM)')
+
+    def _edit_pm_list(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Liste des PM (périmètre)')
+        dlg.resize(420, 560)
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel('Un code PM par ligne (comparé au champ "sro") :'))
+        txt = QPlainTextEdit('\n'.join(self._pm_codes))
+        v.addWidget(txt)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            codes = [ln.strip() for ln in txt.toPlainText().splitlines() if ln.strip()]
+            self._pm_codes = codes
+            self._pm_set = set(codes)
+            self._refresh_pm_label()
+
+    def _in_pm(self, feat, fnames):
+        """True si l'entité est dans le périmètre PM (ou si le filtre est inactif)."""
+        if not self.chk_pm.isChecked() or not self._pm_set:
+            return True
+        if 'sro' not in fnames:
+            return True
+        val = feat['sro']
+        return val is not None and str(val).strip() in self._pm_set
 
     # ─── shared helpers ──────────────────────────────────────────────────────
 
@@ -246,7 +301,9 @@ class QDRIPDialog(QDialog):
         self.chk_ft,   self.cb_ft,   self.le_ft_filter   = _exist_row('ft_arciti')
         self.chk_bt,   self.cb_bt,   self.le_bt_filter   = _exist_row('bt')
         self.chk_athd, self.cb_athd, self.le_athd_filter = _exist_row('athd_artere', '"dispopp_ar" != 0')
-        self.chk_chemi, self.cb_chemi, self.le_chemi_filter = _exist_row('t_cheminement')
+        self.chk_chemi, self.cb_chemi, self.le_chemi_filter = _exist_row(
+            't_cheminement',
+            '"cm_typ_imp" = \'C7\' AND ("cm_typelog" LIKE \'TR\' OR "cm_typelog" LIKE \'TD\')')
         vbox.addWidget(grp_exist)
 
         # Parameters
@@ -590,6 +647,8 @@ class QDRIPDialog(QDialog):
         if c0_flt:
             req.setFilterExpression(c0_flt)
         c0_feats = list(infra_lyr.getFeatures(req))
+        _infra_fn = infra_lyr.fields().names()
+        c0_feats = [f for f in c0_feats if self._in_pm(f, _infra_fn)]
 
         if not c0_feats:
             QMessageBox.information(self, 'Info',
@@ -724,6 +783,8 @@ class QDRIPDialog(QDialog):
         if flt:
             req.setFilterExpression(flt)
         feats = list(lyr.getFeatures(req))
+        _doub_fn = lyr.fields().names()
+        feats = [f for f in feats if self._in_pm(f, _doub_fn)]
 
         if not feats:
             QMessageBox.information(self, 'Info', 'Aucune entité avec ce filtre.')
@@ -875,7 +936,8 @@ class QDRIPDialog(QDialog):
             g = ft.geometry()
             return g.length() if g and not g.isEmpty() else 0.0
 
-        feats = [(f, _long(f)) for f in lyr.getFeatures(req)]
+        feats = [(f, _long(f)) for f in lyr.getFeatures(req)
+                 if self._in_pm(f, fnames)]
         feats.sort(key=lambda x: x[1], reverse=True)
         feats = feats[:top_n]
 
@@ -956,6 +1018,8 @@ class QDRIPDialog(QDialog):
             return g.length() if g and not g.isEmpty() else 0.0
 
         all_bal = list(bal_fd.values())
+        _bal_fn = bal_lyr.fields().names()
+        all_bal = [b for b in all_bal if self._in_pm(b, _bal_fn)]
 
         prog = QProgressDialog(
             'Analyse BAL isolées…', 'Annuler', 0, len(all_bal), self)
