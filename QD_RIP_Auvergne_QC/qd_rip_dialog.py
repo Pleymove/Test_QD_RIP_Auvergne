@@ -221,31 +221,32 @@ class QDRIPDialog(QDialog):
         grp_exist = QGroupBox('Couches existantes')
         gl = QVBoxLayout(grp_exist)
 
-        def _exist_row(label, checked=True):
-            row = QHBoxLayout()
+        def _exist_row(label, default_filter='', checked=True):
+            r1 = QHBoxLayout()
             chk = QCheckBox(label)
             chk.setChecked(checked)
             cb = QgsMapLayerComboBox()
             cb.setFilters(_F_LINE)
-            row.addWidget(chk)
-            row.addWidget(cb, 1)
-            gl.addLayout(row)
-            return chk, cb
+            r1.addWidget(chk)
+            r1.addWidget(cb, 1)
+            gl.addLayout(r1)
+            r2 = QHBoxLayout()
+            r2.addSpacing(20)
+            r2.addWidget(QLabel('Filtre :'))
+            le = QLineEdit(default_filter)
+            le.setPlaceholderText('(toutes les entités)')
+            le.setToolTip(
+                'Filtre QGIS pour ne garder que les entités existantes.\n'
+                'Ex: "statut" = \'E\'  ou  "dispopp_ar" != 0'
+            )
+            r2.addWidget(le, 1)
+            gl.addLayout(r2)
+            return chk, cb, le
 
-        self.chk_ft,   self.cb_ft   = _exist_row('ft_arciti')
-        self.chk_bt,   self.cb_bt   = _exist_row('bt')
-        self.chk_athd, self.cb_athd = _exist_row('athd_artere')
-
-        # athd sub-filter
-        athd_sub = QHBoxLayout()
-        athd_sub.addSpacing(20)
-        athd_sub.addWidget(QLabel('Filtre :'))
-        self.le_athd_filter = QLineEdit('"dispopp_ar" != 0')
-        self.le_athd_filter.setToolTip('Exclut les artères avec dispopp_ar = 0')
-        athd_sub.addWidget(self.le_athd_filter, 1)
-        gl.addLayout(athd_sub)
-
-        self.chk_chemi, self.cb_chemi = _exist_row('t_cheminement')
+        self.chk_ft,   self.cb_ft,   self.le_ft_filter   = _exist_row('ft_arciti')
+        self.chk_bt,   self.cb_bt,   self.le_bt_filter   = _exist_row('bt')
+        self.chk_athd, self.cb_athd, self.le_athd_filter = _exist_row('athd_artere', '"dispopp_ar" != 0')
+        self.chk_chemi, self.cb_chemi, self.le_chemi_filter = _exist_row('t_cheminement')
         vbox.addWidget(grp_exist)
 
         # Parameters
@@ -564,17 +565,17 @@ class QDRIPDialog(QDialog):
             QMessageBox.warning(self, 'Erreur', 'Sélectionnez la couche Infra.')
             return
 
-        # Collect selected existing layers
+        # Collect selected existing layers (chaque couche a son propre filtre)
         existing = []
-        if self.chk_ft.isChecked() and self.cb_ft.currentLayer():
-            existing.append((self.cb_ft.currentLayer(), None))
-        if self.chk_bt.isChecked() and self.cb_bt.currentLayer():
-            existing.append((self.cb_bt.currentLayer(), None))
-        if self.chk_athd.isChecked() and self.cb_athd.currentLayer():
-            flt = self.le_athd_filter.text().strip() or None
-            existing.append((self.cb_athd.currentLayer(), flt))
-        if self.chk_chemi.isChecked() and self.cb_chemi.currentLayer():
-            existing.append((self.cb_chemi.currentLayer(), None))
+        for chk, cb, le in [
+            (self.chk_ft,   self.cb_ft,   self.le_ft_filter),
+            (self.chk_bt,   self.cb_bt,   self.le_bt_filter),
+            (self.chk_athd, self.cb_athd, self.le_athd_filter),
+            (self.chk_chemi, self.cb_chemi, self.le_chemi_filter),
+        ]:
+            if chk.isChecked() and cb.currentLayer():
+                flt = le.text().strip() or None
+                existing.append((cb.currentLayer(), flt))
 
         if not existing:
             QMessageBox.warning(self, 'Erreur', 'Cochez au moins une couche existante.')
@@ -621,7 +622,8 @@ class QDRIPDialog(QDialog):
             prog.setValue(i)
             if prog.wasCanceled():
                 break
-            if i % 20 == 0:
+            if i % 10 == 0:
+                prog.setLabelText(f'Chevauchements… {i}/{len(c0_feats)} ({100*i//len(c0_feats)} %)')
                 QApplication.processEvents()
 
             geom = feat.geometry()
@@ -674,7 +676,6 @@ class QDRIPDialog(QDialog):
 
         self.tbl_chev.setSortingEnabled(False)
         self.tbl_chev.setRowCount(0)
-        red = QBrush(QColor('#ffd6d6'))
 
         for r in results:
             row = self.tbl_chev.rowCount()
@@ -692,7 +693,6 @@ class QDRIPDialog(QDialog):
                 _ni(f"{r['pct']:.1f}%"),
             ]
             for col, item in enumerate(cells):
-                item.setBackground(red)
                 self.tbl_chev.setItem(row, col, item)
 
             # Store IDs in col 0 for zoom/select
@@ -749,7 +749,8 @@ class QDRIPDialog(QDialog):
             prog.setValue(i)
             if prog.wasCanceled():
                 break
-            if i % 50 == 0:
+            if i % 10 == 0:
+                prog.setLabelText(f'Doublons… {i}/{len(feats)} ({100*i//len(feats)} %)')
                 QApplication.processEvents()
 
             g1 = ft1.geometry()
@@ -810,7 +811,6 @@ class QDRIPDialog(QDialog):
 
         self.tbl_doub.setSortingEnabled(False)
         self.tbl_doub.setRowCount(0)
-        orange = QBrush(QColor('#fff0cc'))
 
         for r in results:
             row = self.tbl_doub.rowCount()
@@ -828,7 +828,6 @@ class QDRIPDialog(QDialog):
                 _ni(f"{r['ov']:.1f}"),
             ]
             for col, item in enumerate(cells):
-                item.setBackground(orange)
                 self.tbl_doub.setItem(row, col, item)
 
             self.tbl_doub.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, r['fid1'])
@@ -882,7 +881,6 @@ class QDRIPDialog(QDialog):
 
         self.tbl_parc.setSortingEnabled(False)
         self.tbl_parc.setRowCount(0)
-        blue = QBrush(QColor('#e8f4fd'))
 
         for rank, (ft, long_v) in enumerate(feats, 1):
             row = self.tbl_parc.rowCount()
@@ -900,7 +898,6 @@ class QDRIPDialog(QDialog):
                 _si(_safe(ft, 'affectation')),
             ]
             for col, item in enumerate(cells):
-                item.setBackground(blue)
                 self.tbl_parc.setItem(row, col, item)
 
             self.tbl_parc.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, ft.id())
@@ -972,7 +969,8 @@ class QDRIPDialog(QDialog):
             prog.setValue(i)
             if prog.wasCanceled():
                 break
-            if i % 100 == 0:
+            if i % 50 == 0:
+                prog.setLabelText(f'BAL isolées… {i}/{len(all_bal)} ({100*i//len(all_bal)} %)')
                 QApplication.processEvents()
 
             bg = bal_ft.geometry()
@@ -1026,7 +1024,6 @@ class QDRIPDialog(QDialog):
 
         self.tbl_bal.setSortingEnabled(False)
         self.tbl_bal.setRowCount(0)
-        yellow = QBrush(QColor('#fffbe6'))
 
         for r in results:
             row = self.tbl_bal.rowCount()
@@ -1044,7 +1041,6 @@ class QDRIPDialog(QDialog):
                 _si(r['infra_idpa']),
             ]
             for col, item in enumerate(cells):
-                item.setBackground(yellow)
                 self.tbl_bal.setItem(row, col, item)
 
             self.tbl_bal.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, r['bal_fid'])
