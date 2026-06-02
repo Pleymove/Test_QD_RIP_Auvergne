@@ -615,12 +615,12 @@ class QDRIPDialog(QDialog):
         sh.addWidget(self.lbl_cnt_bal)
         rv.addLayout(sh)
 
-        self.tbl_bal = QTableWidget(0, 10)
+        self.tbl_bal = QTableWidget(0, 9)
         self.tbl_bal.setHorizontalHeaderLabels([
             'ID BAL', 'Nb voisins BAL',
             'ID Infra proche', 'Dist. infra (m)', 'Long. infra (m)',
             'NRO infra', 'SRO infra', 'id_pa infra',
-            'Statut infra', 'Mode pose infra',
+            'Type infra',   # C0, C1, E0, E1...
         ])
         self._style_table(self.tbl_bal)
         self.tbl_bal.doubleClicked.connect(
@@ -1020,20 +1020,29 @@ class QDRIPDialog(QDialog):
             bal_idx.insertFeature(ft)
             bal_fd[ft.id()] = ft
 
-        # Infra index
-        infra_idx = QgsSpatialIndex()
-        infra_fd  = {}
+        # Infra index — on mémorise aussi le sro pour le filtrage par PM
+        infra_idx     = QgsSpatialIndex()
+        infra_fd      = {}
+        infra_sro_map = {}   # fid → sro string
         req = QgsFeatureRequest()
         if infra_flt:
             req.setFilterExpression(infra_flt)
         for ft in infra_lyr.getFeatures(req):
             infra_idx.insertFeature(ft)
             infra_fd[ft.id()] = ft
+            sro_v = ft['sro'] if 'sro' in infra_lyr.fields().names() and ft['sro'] is not None else ''
+            infra_sro_map[ft.id()] = str(sro_v).strip()
 
         infra_fnames = infra_lyr.fields().names()
 
         def _infra_safe(ft, field):
             return str(ft[field]) if field in infra_fnames and ft[field] is not None else ''
+
+        def _infra_type(ft):
+            """Retourne le type combiné ex. C0, C1, E0, E1..."""
+            s = _infra_safe(ft, 'statut')
+            m = _infra_safe(ft, 'mode_pose')
+            return (s + m).strip() or '—'
 
         def _infra_long(ft):
             if 'long' in infra_fnames and ft['long'] is not None:
@@ -1081,7 +1090,12 @@ class QDRIPDialog(QDialog):
             if nb_voisins > 0:
                 continue
 
-            # Find nearest infra feature (search in 10× radius to be safe)
+            # PM de la BAL courante (pour filtrer l'infra par PM)
+            bal_sro = ''
+            if 'sro' in _bal_fn and bal_ft['sro'] is not None:
+                bal_sro = str(bal_ft['sro']).strip()
+
+            # Find nearest infra feature in the SAME PM (search in 10× radius to be safe)
             search_radius = max(radius * 10, 5000.0)
             ibbox = bg.boundingBox()
             ibbox.grow(search_radius)
@@ -1090,6 +1104,9 @@ class QDRIPDialog(QDialog):
             nearest_fid  = None
             nearest_dist = float('inf')
             for ifid in candidates:
+                # Restrict to same PM when BAL has a known sro
+                if bal_sro and infra_sro_map.get(ifid, '') != bal_sro:
+                    continue
                 d = bg.distance(infra_fd[ifid].geometry())
                 if d < nearest_dist:
                     nearest_dist = d
@@ -1097,18 +1114,17 @@ class QDRIPDialog(QDialog):
 
             nf = infra_fd[nearest_fid] if nearest_fid is not None else None
             results.append(dict(
-                bal_fid         = bal_ft.id(),
-                bal_layer_id    = bal_lyr.id(),
-                nb_voisins      = nb_voisins,
-                infra_fid       = nearest_fid if nf is not None else -1,
-                dist_infra      = nearest_dist if nf is not None else float('inf'),
-                infra_long      = _infra_long(nf) if nf is not None else 0.0,
-                infra_nro       = _infra_safe(nf, 'nro')      if nf is not None else '',
-                infra_sro       = _infra_safe(nf, 'sro')      if nf is not None else '',
-                infra_idpa      = _infra_safe(nf, 'id_pa')    if nf is not None else '',
-                infra_statut    = _infra_safe(nf, 'statut')   if nf is not None else '',
-                infra_mode_pose = _infra_safe(nf, 'mode_pose') if nf is not None else '',
-                infra_layer_id  = infra_lyr.id(),
+                bal_fid        = bal_ft.id(),
+                bal_layer_id   = bal_lyr.id(),
+                nb_voisins     = nb_voisins,
+                infra_fid      = nearest_fid if nf is not None else -1,
+                dist_infra     = nearest_dist if nf is not None else float('inf'),
+                infra_long     = _infra_long(nf) if nf is not None else 0.0,
+                infra_nro      = _infra_safe(nf, 'nro')   if nf is not None else '',
+                infra_sro      = _infra_safe(nf, 'sro')   if nf is not None else '',
+                infra_idpa     = _infra_safe(nf, 'id_pa') if nf is not None else '',
+                infra_type     = _infra_type(nf)          if nf is not None else '—',
+                infra_layer_id = infra_lyr.id(),
             ))
 
         prog.setValue(len(all_bal))
@@ -1133,8 +1149,7 @@ class QDRIPDialog(QDialog):
                 _si(r['infra_nro']),
                 _si(r['infra_sro']),
                 _si(r['infra_idpa']),
-                _si(r['infra_statut']),
-                _si(r['infra_mode_pose']),
+                _si(r['infra_type']),   # C0, C1, E0, E1...
             ]
             for col, item in enumerate(cells):
                 self.tbl_bal.setItem(row, col, item)
@@ -1144,12 +1159,8 @@ class QDRIPDialog(QDialog):
 
         self.tbl_bal.setSortingEnabled(True)
 
-        # Populate type filter combo with unique statut+mode_pose combinations
-        types = sorted({
-            (r['infra_statut'] + r['infra_mode_pose']).strip()
-            for r in results
-            if (r['infra_statut'] + r['infra_mode_pose']).strip()
-        })
+        # Populate type filter combo with unique infra types found
+        types = sorted({r['infra_type'] for r in results if r['infra_type'] not in ('', '—')})
         self.cmb_bal_type.blockSignals(True)
         self.cmb_bal_type.clear()
         self.cmb_bal_type.addItem('(tous)')
@@ -1275,7 +1286,7 @@ class QDRIPDialog(QDialog):
         iface.setActiveLayer(lyr)
 
     def _filter_bal_table(self):
-        """Filter BAL table by text search AND infra type combo."""
+        """Filter BAL table by text search AND infra type combo (col 8)."""
         text     = self.le_srch_bal.text().lower()
         sel_type = self.cmb_bal_type.currentText()
         use_type = sel_type not in ('', '(tous)')
@@ -1289,9 +1300,8 @@ class QDRIPDialog(QDialog):
             else:
                 text_ok = True
             if use_type:
-                s = self.tbl_bal.item(row, 8).text() if self.tbl_bal.item(row, 8) else ''
-                m = self.tbl_bal.item(row, 9).text() if self.tbl_bal.item(row, 9) else ''
-                type_ok = sel_type == (s + m).strip()
+                cell = self.tbl_bal.item(row, 8)   # Type infra column
+                type_ok = sel_type == (cell.text() if cell else '')
             else:
                 type_ok = True
             self.tbl_bal.setRowHidden(row, not (text_ok and type_ok))
