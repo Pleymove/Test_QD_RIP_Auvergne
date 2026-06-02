@@ -19,7 +19,7 @@ from qgis.PyQt.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
     QGroupBox, QFormLayout, QProgressDialog, QMessageBox,
     QApplication, QAbstractItemView, QFileDialog, QFrame,
-    QSplitter, QPlainTextEdit, QDialogButtonBox, QTextBrowser,
+    QSplitter, QPlainTextEdit, QDialogButtonBox, QTextBrowser, QComboBox,
 )
 from qgis.PyQt.QtCore import Qt, QUrl
 from qgis.PyQt.QtGui import QColor, QBrush, QFont, QDesktopServices
@@ -599,17 +599,28 @@ class QDRIPDialog(QDialog):
         sh.addWidget(QLabel('Recherche :'))
         self.le_srch_bal = QLineEdit()
         self.le_srch_bal.setPlaceholderText('Filtrer…')
-        self.le_srch_bal.textChanged.connect(lambda t: self._filter_table(self.tbl_bal, t))
+        self.le_srch_bal.textChanged.connect(lambda _: self._filter_bal_table())
         sh.addWidget(self.le_srch_bal, 1)
+        sh.addWidget(QLabel('Type infra :'))
+        self.cmb_bal_type = QComboBox()
+        self.cmb_bal_type.setMinimumWidth(90)
+        self.cmb_bal_type.addItem('(tous)')
+        self.cmb_bal_type.setToolTip(
+            'Filtrer par type d\'infra (statut + mode_pose).\n'
+            'Ex : C0 = aérien à créer, C1 = enterré à créer, E0 = aérien existant.'
+        )
+        self.cmb_bal_type.currentTextChanged.connect(lambda _: self._filter_bal_table())
+        sh.addWidget(self.cmb_bal_type)
         self.lbl_cnt_bal = QLabel('—')
         sh.addWidget(self.lbl_cnt_bal)
         rv.addLayout(sh)
 
-        self.tbl_bal = QTableWidget(0, 8)
+        self.tbl_bal = QTableWidget(0, 10)
         self.tbl_bal.setHorizontalHeaderLabels([
             'ID BAL', 'Nb voisins BAL',
             'ID Infra proche', 'Dist. infra (m)', 'Long. infra (m)',
             'NRO infra', 'SRO infra', 'id_pa infra',
+            'Statut infra', 'Mode pose infra',
         ])
         self._style_table(self.tbl_bal)
         self.tbl_bal.doubleClicked.connect(
@@ -1084,17 +1095,20 @@ class QDRIPDialog(QDialog):
                     nearest_dist = d
                     nearest_fid  = ifid
 
+            nf = infra_fd[nearest_fid] if nearest_fid is not None else None
             results.append(dict(
-                bal_fid      = bal_ft.id(),
-                bal_layer_id = bal_lyr.id(),
-                nb_voisins   = nb_voisins,
-                infra_fid    = nearest_fid if nearest_fid is not None else -1,
-                dist_infra   = nearest_dist if nearest_fid is not None else float('inf'),
-                infra_long   = _infra_long(infra_fd[nearest_fid]) if nearest_fid is not None else 0.0,
-                infra_nro    = _infra_safe(infra_fd[nearest_fid], 'nro')   if nearest_fid is not None else '',
-                infra_sro    = _infra_safe(infra_fd[nearest_fid], 'sro')   if nearest_fid is not None else '',
-                infra_idpa   = _infra_safe(infra_fd[nearest_fid], 'id_pa') if nearest_fid is not None else '',
-                infra_layer_id = infra_lyr.id(),
+                bal_fid         = bal_ft.id(),
+                bal_layer_id    = bal_lyr.id(),
+                nb_voisins      = nb_voisins,
+                infra_fid       = nearest_fid if nf is not None else -1,
+                dist_infra      = nearest_dist if nf is not None else float('inf'),
+                infra_long      = _infra_long(nf) if nf is not None else 0.0,
+                infra_nro       = _infra_safe(nf, 'nro')      if nf is not None else '',
+                infra_sro       = _infra_safe(nf, 'sro')      if nf is not None else '',
+                infra_idpa      = _infra_safe(nf, 'id_pa')    if nf is not None else '',
+                infra_statut    = _infra_safe(nf, 'statut')   if nf is not None else '',
+                infra_mode_pose = _infra_safe(nf, 'mode_pose') if nf is not None else '',
+                infra_layer_id  = infra_lyr.id(),
             ))
 
         prog.setValue(len(all_bal))
@@ -1119,6 +1133,8 @@ class QDRIPDialog(QDialog):
                 _si(r['infra_nro']),
                 _si(r['infra_sro']),
                 _si(r['infra_idpa']),
+                _si(r['infra_statut']),
+                _si(r['infra_mode_pose']),
             ]
             for col, item in enumerate(cells):
                 self.tbl_bal.setItem(row, col, item)
@@ -1127,6 +1143,19 @@ class QDRIPDialog(QDialog):
             self.tbl_bal.item(row, 0).setData(Qt.ItemDataRole.UserRole + 2, r['bal_layer_id'])
 
         self.tbl_bal.setSortingEnabled(True)
+
+        # Populate type filter combo with unique statut+mode_pose combinations
+        types = sorted({
+            (r['infra_statut'] + r['infra_mode_pose']).strip()
+            for r in results
+            if (r['infra_statut'] + r['infra_mode_pose']).strip()
+        })
+        self.cmb_bal_type.blockSignals(True)
+        self.cmb_bal_type.clear()
+        self.cmb_bal_type.addItem('(tous)')
+        for t in types:
+            self.cmb_bal_type.addItem(t)
+        self.cmb_bal_type.blockSignals(False)
 
         n = len(results)
         self.lbl_cnt_bal.setText(f'{n} BAL isolée(s)')
@@ -1244,6 +1273,28 @@ class QDRIPDialog(QDialog):
         fids = [f for f in (fid1, fid2) if f is not None]
         lyr.selectByIds(fids)
         iface.setActiveLayer(lyr)
+
+    def _filter_bal_table(self):
+        """Filter BAL table by text search AND infra type combo."""
+        text     = self.le_srch_bal.text().lower()
+        sel_type = self.cmb_bal_type.currentText()
+        use_type = sel_type not in ('', '(tous)')
+        for row in range(self.tbl_bal.rowCount()):
+            if text:
+                text_ok = any(
+                    text in (self.tbl_bal.item(row, c).text().lower()
+                             if self.tbl_bal.item(row, c) else '')
+                    for c in range(self.tbl_bal.columnCount())
+                )
+            else:
+                text_ok = True
+            if use_type:
+                s = self.tbl_bal.item(row, 8).text() if self.tbl_bal.item(row, 8) else ''
+                m = self.tbl_bal.item(row, 9).text() if self.tbl_bal.item(row, 9) else ''
+                type_ok = sel_type == (s + m).strip()
+            else:
+                type_ok = True
+            self.tbl_bal.setRowHidden(row, not (text_ok and type_ok))
 
     def _clear_selection(self):
         for lyr in QgsProject.instance().mapLayers().values():
