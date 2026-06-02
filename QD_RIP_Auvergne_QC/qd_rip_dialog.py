@@ -1343,7 +1343,13 @@ class QDRIPDialog(QDialog):
                     fig, ax = plt.subplots(figsize=(7, 3.5))
                     fig.patch.set_facecolor(BG)
                     ax.set_facecolor(BG)
-                    ax.hist(lengths, bins=20, color=COLORS[0], edgecolor='white', linewidth=0.5)
+                    _, _, patches = ax.hist(lengths, bins=20, color=COLORS[0],
+                                             edgecolor='white', linewidth=0.5)
+                    for p in patches:
+                        h = p.get_height()
+                        if h > 0:
+                            ax.text(p.get_x() + p.get_width() / 2., h,
+                                    str(int(h)), ha='center', va='bottom', fontsize=7)
                     ax.set_xlabel('Longueur de chevauchement (m)', fontsize=9)
                     ax.set_ylabel('Fréquence', fontsize=9)
                     ax.set_title('Distribution des longueurs de chevauchement', fontsize=11,
@@ -1392,8 +1398,14 @@ class QDRIPDialog(QDialog):
                     fig, ax = plt.subplots(figsize=(7, 3.5))
                     fig.patch.set_facecolor(BG)
                     ax.set_facecolor(BG)
-                    ax.hist(dists, bins=15, color='#e67e22', edgecolor='white', linewidth=0.5)
-                    ax.set_xlabel('Distance à l\'infra C0 la plus proche (m)', fontsize=9)
+                    _, _, patches = ax.hist(dists, bins=15, color='#e67e22',
+                                             edgecolor='white', linewidth=0.5)
+                    for p in patches:
+                        h = p.get_height()
+                        if h > 0:
+                            ax.text(p.get_x() + p.get_width() / 2., h,
+                                    str(int(h)), ha='center', va='bottom', fontsize=7)
+                    ax.set_xlabel("Distance à l'infra C0 la plus proche (m)", fontsize=9)
                     ax.set_ylabel('Nombre de BAL', fontsize=9)
                     ax.set_title('Distribution des distances BAL isolées → Infra C0', fontsize=11,
                                  fontweight='bold', pad=10)
@@ -1493,8 +1505,6 @@ class QDRIPDialog(QDialog):
                 {'<div class="pills">' + layer_pills + '</div>' if layer_pills else ''}
                 {_chart('chev_layers', 'Répartition des conflits par couche existante')}
                 {_chart('chev_hist', 'Distribution des longueurs de chevauchement')}
-                <h3>Détail des conflits</h3>
-                {_table_html(chev)}
             </section>'''
 
         doub_section = ''
@@ -1507,8 +1517,6 @@ class QDRIPDialog(QDialog):
                           '#c0392b' if n_doub > 0 else '#27ae60')}
                     {_kpi(f'{total_ov_doub:,.1f} m', 'Cumul superposition')}
                 </div>
-                <h3>Détail des doublons</h3>
-                {_table_html(doub)}
             </section>'''
 
         parc_section = ''
@@ -1521,8 +1529,6 @@ class QDRIPDialog(QDialog):
                     {_kpi(f'{total_len_parc:,.0f} m', 'Longueur totale')}
                 </div>
                 {_chart('parc_top10', 'Top 10 des parcours les plus longs')}
-                <h3>Liste des parcours</h3>
-                {_table_html(parc)}
             </section>'''
 
         bal_section = ''
@@ -1547,8 +1553,6 @@ class QDRIPDialog(QDialog):
                     {_kpi(avg_dist or "—", "Distance moy. à l'infra")}
                 </div>
                 {_chart('bal_dist', 'Distribution des distances BAL → Infra C0')}
-                <h3>Liste des BAL isolées</h3>
-                {_table_html(bal)}
             </section>'''
 
         no_data_warn = ''
