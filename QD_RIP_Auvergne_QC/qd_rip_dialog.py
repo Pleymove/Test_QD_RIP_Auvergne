@@ -35,15 +35,17 @@ from .pm_perimeter import DEFAULT_PM_CODES
 # Resolution du filtre de couche, compatible QGIS 3.16 -> 4.x
 try:
     from qgis.core import Qgis
-    _F_LINE = Qgis.LayerFilter.LineLayer
+    _F_LINE  = Qgis.LayerFilter.LineLayer
     _F_POINT = Qgis.LayerFilter.PointLayer
+    _F_POLY  = Qgis.LayerFilter.PolygonLayer
 except (ImportError, AttributeError):
     try:
         from qgis.core import QgsMapLayerProxyModel
     except ImportError:
         from qgis.gui import QgsMapLayerProxyModel
-    _F_LINE = QgsMapLayerProxyModel.LineLayer
+    _F_LINE  = QgsMapLayerProxyModel.LineLayer
     _F_POINT = QgsMapLayerProxyModel.PointLayer
+    _F_POLY  = QgsMapLayerProxyModel.PolygonLayer
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -82,6 +84,7 @@ class QDRIPDialog(QDialog):
         'athd_artere':  ['athd_artere_ab4dbaf5', 'athd_artere'],
         't_cheminement':['t_cheminement_aa3c43e0', 't_cheminement'],
         'bal':          ['bal_442ddc78', 'bal'],
+        'za_sro':       ['za_sro'],
     }
 
     def __init__(self, parent=None):
@@ -132,6 +135,10 @@ class QDRIPDialog(QDialog):
         bal = self._find_layer(*hints['bal'])
         if bal:
             self.cb_bal.setLayer(bal)
+
+        zasro = self._find_layer(*hints['za_sro'])
+        if zasro:
+            self.cb_zasro.setLayer(zasro)
 
     # ─── top-level UI ────────────────────────────────────────────────────────
 
@@ -561,9 +568,25 @@ class QDRIPDialog(QDialog):
         self.cb_infra_bal.setFilters(_F_LINE)
         frm.addRow('Couche Infra :', self.cb_infra_bal)
 
-        self.le_flt_bal = QLineEdit('"statut" = \'C\' AND "mode_pose" = 0')
-        self.le_flt_bal.setToolTip('Filtre sur la couche Infra (C0 par défaut)')
+        self.le_flt_bal = QLineEdit()
+        self.le_flt_bal.setPlaceholderText('(toute l\'infra)')
+        self.le_flt_bal.setToolTip(
+            'Filtre optionnel sur la couche Infra.\n'
+            'Laisser vide pour trouver la vraie infra la plus proche\n'
+            'quelle que soit sa nature (C0, E0, E7…).'
+        )
         frm.addRow('Filtre Infra :', self.le_flt_bal)
+
+        self.cb_zasro = QgsMapLayerComboBox()
+        self.cb_zasro.setFilters(_F_POLY)
+        self.cb_zasro.setAllowEmptyLayer(True)
+        self.cb_zasro.setToolTip(
+            'Couche polygonale za_sro (zones PM).\n'
+            'Utilisée en repli quand le champ "sro" de la BAL est vide :\n'
+            'on cherche le polygone PM contenant la BAL, puis l\'infra\n'
+            'dont le champ "sro" correspond à ce polygone.'
+        )
+        frm.addRow('Périmètre PM (za_sro) :', self.cb_zasro)
 
         self.sp_rayon = QSpinBox()
         self.sp_rayon.setRange(50, 10000)
@@ -578,8 +601,9 @@ class QDRIPDialog(QDialog):
         vbox.addLayout(frm)
 
         info = QLabel(
-            '<small><i>Les résultats sont triés par distance croissante '
-            'à l\'infra C0 la plus proche (les BAL les plus éloignées en premier).</i></small>'
+            '<small><i>Pour chaque BAL isolée, l\'infra la plus proche est cherchée '
+            'dans la même PM (champ sro). Si le sro est absent, repli sur le polygone '
+            'za_sro contenant la BAL. Le type réel (C0, E0, E7…) est affiché.</i></small>'
         )
         info.setWordWrap(True)
         vbox.addWidget(info)
@@ -1020,20 +1044,35 @@ class QDRIPDialog(QDialog):
             bal_idx.insertFeature(ft)
             bal_fd[ft.id()] = ft
 
-        # Infra index — on mémorise aussi le sro pour le filtrage par PM
+        # Infra index — on charge TOUTES les natures pour trouver la vraie plus proche
         infra_idx     = QgsSpatialIndex()
         infra_fd      = {}
         infra_sro_map = {}   # fid → sro string
         req = QgsFeatureRequest()
         if infra_flt:
             req.setFilterExpression(infra_flt)
+        infra_fnames_pre = infra_lyr.fields().names()
         for ft in infra_lyr.getFeatures(req):
             infra_idx.insertFeature(ft)
             infra_fd[ft.id()] = ft
-            sro_v = ft['sro'] if 'sro' in infra_lyr.fields().names() and ft['sro'] is not None else ''
+            sro_v = ft['sro'] if 'sro' in infra_fnames_pre and ft['sro'] is not None else ''
             infra_sro_map[ft.id()] = str(sro_v).strip()
 
         infra_fnames = infra_lyr.fields().names()
+
+        # za_sro index — repli quand le champ sro de la BAL est vide
+        zasro_lyr = self.cb_zasro.currentLayer()
+        zasro_idx     = None
+        zasro_fd      = {}
+        zasro_sro_map = {}   # fid → sro string
+        if zasro_lyr:
+            zasro_idx = QgsSpatialIndex()
+            zasro_fn  = zasro_lyr.fields().names()
+            for ft in zasro_lyr.getFeatures():
+                zasro_idx.insertFeature(ft)
+                zasro_fd[ft.id()] = ft
+                sro_v = ft['sro'] if 'sro' in zasro_fn and ft['sro'] is not None else ''
+                zasro_sro_map[ft.id()] = str(sro_v).strip()
 
         def _infra_safe(ft, field):
             return str(ft[field]) if field in infra_fnames and ft[field] is not None else ''
@@ -1090,12 +1129,21 @@ class QDRIPDialog(QDialog):
             if nb_voisins > 0:
                 continue
 
-            # PM de la BAL courante (pour filtrer l'infra par PM)
+            # ── Déterminer la PM effective de cette BAL ──────────────────────
+            # Étape 1 : champ sro de la BAL
             bal_sro = ''
             if 'sro' in _bal_fn and bal_ft['sro'] is not None:
                 bal_sro = str(bal_ft['sro']).strip()
 
-            # Find nearest infra feature in the SAME PM (search in 10× radius to be safe)
+            # Étape 2 : repli polygone za_sro si sro vide ou absent
+            if not bal_sro and zasro_idx is not None:
+                pt_bbox = bg.boundingBox()
+                for zasro_fid in zasro_idx.intersects(pt_bbox):
+                    if zasro_fd[zasro_fid].geometry().contains(bg):
+                        bal_sro = zasro_sro_map.get(zasro_fid, '')
+                        break
+
+            # ── Chercher l'infra la plus proche dans la même PM ──────────────
             search_radius = max(radius * 10, 5000.0)
             ibbox = bg.boundingBox()
             ibbox.grow(search_radius)
@@ -1104,7 +1152,6 @@ class QDRIPDialog(QDialog):
             nearest_fid  = None
             nearest_dist = float('inf')
             for ifid in candidates:
-                # Restrict to same PM when BAL has a known sro
                 if bal_sro and infra_sro_map.get(ifid, '') != bal_sro:
                     continue
                 d = bg.distance(infra_fd[ifid].geometry())
