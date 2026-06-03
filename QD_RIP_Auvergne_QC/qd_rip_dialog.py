@@ -7,7 +7,6 @@ Onglets :
   4. BAL isolées (aucun voisin BAL dans un rayon donné)
 """
 
-import csv
 import os
 import tempfile
 import datetime
@@ -248,7 +247,7 @@ class QDRIPDialog(QDialog):
 
     @staticmethod
     def _action_bar(tbl, tab_key, extra_widgets=None):
-        """Return a QWidget containing Zoom / Sélectionner / CSV buttons."""
+        """Return a QWidget containing Zoom / Sélectionner / XLSX buttons."""
         w = QWidget()
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 2, 0, 2)
@@ -256,7 +255,7 @@ class QDRIPDialog(QDialog):
         btn_zoom = QPushButton('🔍  Zoom')
         btn_zoom.setToolTip('Double-clic sur une ligne pour zoomer directement')
         btn_sel  = QPushButton('✓  Sélectionner dans QGIS')
-        btn_csv  = QPushButton('💾  Exporter CSV')
+        btn_csv  = QPushButton('💾  Exporter Excel')
 
         h.addWidget(btn_zoom)
         h.addWidget(btn_sel)
@@ -388,7 +387,7 @@ class QDRIPDialog(QDialog):
         ab.layout().insertWidget(2, btn_clr)
         bz.clicked.connect(lambda: self._zoom_selected(self.tbl_chev))
         bs.clicked.connect(lambda: self._select_qgis(self.tbl_chev))
-        bc.clicked.connect(lambda: self._export_csv(self.tbl_chev, 'chevauchements'))
+        bc.clicked.connect(lambda: self._export_xlsx(self.tbl_chev, 'chevauchements'))
         btn_shp_chev = QPushButton('🗺  Exporter SHP')
         btn_shp_chev.setToolTip('Exporter les entités visibles en Shapefile')
         btn_shp_chev.clicked.connect(lambda: self._export_shp(self.tbl_chev, 'chevauchements'))
@@ -476,7 +475,7 @@ class QDRIPDialog(QDialog):
             self.tbl_doub.currentRow()
         ))
         bs.clicked.connect(lambda: self._select_qgis_doub())
-        bc.clicked.connect(lambda: self._export_csv(self.tbl_doub, 'doublons'))
+        bc.clicked.connect(lambda: self._export_xlsx(self.tbl_doub, 'doublons'))
         btn_shp_doub = QPushButton('🗺  Exporter SHP')
         btn_shp_doub.setToolTip('Exporter les entités visibles en Shapefile')
         btn_shp_doub.clicked.connect(lambda: self._export_shp(self.tbl_doub, 'doublons', include_col4_fid=True))
@@ -550,7 +549,7 @@ class QDRIPDialog(QDialog):
         ab, bz, bs, bc = self._action_bar(self.tbl_parc, 'parc')
         bz.clicked.connect(lambda: self._zoom_selected(self.tbl_parc))
         bs.clicked.connect(lambda: self._select_qgis(self.tbl_parc))
-        bc.clicked.connect(lambda: self._export_csv(self.tbl_parc, 'parcours_longs'))
+        bc.clicked.connect(lambda: self._export_xlsx(self.tbl_parc, 'parcours_longs'))
         btn_shp_parc = QPushButton('🗺  Exporter SHP')
         btn_shp_parc.setToolTip('Exporter les entités visibles en Shapefile')
         btn_shp_parc.clicked.connect(lambda: self._export_shp(self.tbl_parc, 'parcours_longs'))
@@ -668,7 +667,7 @@ class QDRIPDialog(QDialog):
         ab, bz, bs, bc = self._action_bar(self.tbl_bal, 'bal')
         bz.clicked.connect(lambda: self._zoom_selected(self.tbl_bal))
         bs.clicked.connect(lambda: self._select_qgis(self.tbl_bal))
-        bc.clicked.connect(lambda: self._export_csv(self.tbl_bal, 'bal_isolees'))
+        bc.clicked.connect(lambda: self._export_xlsx(self.tbl_bal, 'bal_isolees'))
         btn_shp_bal = QPushButton('🗺  Exporter SHP')
         btn_shp_bal.setToolTip('Exporter les entités visibles en Shapefile')
         btn_shp_bal.clicked.connect(lambda: self._export_shp(self.tbl_bal, 'bal_isolees'))
@@ -1375,29 +1374,191 @@ class QDRIPDialog(QDialog):
             if hasattr(lyr, 'removeSelection'):
                 lyr.removeSelection()
 
-    def _export_csv(self, tbl, name):
+    def _export_xlsx(self, tbl, name):
+        """Export the visible table rows to a real Excel file (.xlsx) as a table."""
         path, _ = QFileDialog.getSaveFileName(
-            self, 'Exporter CSV', f'{name}.csv', 'CSV (*.csv)')
+            self, 'Exporter Excel', f'{name}.xlsx', 'Classeur Excel (*.xlsx)')
         if not path:
             return
+        if not path.lower().endswith('.xlsx'):
+            path += '.xlsx'
+
+        headers = [
+            (tbl.horizontalHeaderItem(c).text()
+             if tbl.horizontalHeaderItem(c) else f'Col{c}')
+            for c in range(tbl.columnCount())
+        ]
+        rows = []
+        for row in range(tbl.rowCount()):
+            if tbl.isRowHidden(row):
+                continue
+            rows.append([
+                (tbl.item(row, c).text() if tbl.item(row, c) else '')
+                for c in range(tbl.columnCount())
+            ])
+
         try:
-            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
-                w = csv.writer(f, delimiter=';')
-                w.writerow([
-                    (tbl.horizontalHeaderItem(c).text()
-                     if tbl.horizontalHeaderItem(c) else f'Col{c}')
-                    for c in range(tbl.columnCount())
-                ])
-                for row in range(tbl.rowCount()):
-                    if tbl.isRowHidden(row):
-                        continue
-                    w.writerow([
-                        (tbl.item(row, c).text() if tbl.item(row, c) else '')
-                        for c in range(tbl.columnCount())
-                    ])
-            QMessageBox.information(self, 'Export', f'Fichier exporté :\n{path}')
+            self._write_xlsx(path, headers, rows, name)
+            QMessageBox.information(
+                self, 'Export',
+                f'{len(rows)} ligne(s) exportée(s) :\n{path}')
         except Exception as e:
             QMessageBox.critical(self, 'Erreur export', str(e))
+
+    # ── Écriture XLSX native (OOXML, sans dépendance externe) ────────────────
+    @staticmethod
+    def _xlsx_col_letter(n):
+        """1 -> A, 27 -> AA."""
+        s = ''
+        while n > 0:
+            n, r = divmod(n - 1, 26)
+            s = chr(65 + r) + s
+        return s
+
+    @staticmethod
+    def _xlsx_esc(t):
+        return (t.replace('&', '&amp;').replace('<', '&lt;')
+                 .replace('>', '&gt;').replace('"', '&quot;'))
+
+    def _write_xlsx(self, path, headers, rows, name):
+        """Write a minimal but valid .xlsx with the data formatted as an Excel Table."""
+        import re
+        import zipfile
+
+        esc = self._xlsx_esc
+        col_letter = self._xlsx_col_letter
+        ncols = len(headers)
+        nrows = len(rows)
+        last_col = col_letter(ncols)
+        # Le tableau couvre l'en-tête (ligne 1) + les données.
+        last_row = nrows + 1
+        ref = f'A1:{last_col}{last_row}'
+
+        num_re = re.compile(r'^-?\d+(?:[.,]\d+)?$')
+
+        def is_num(txt):
+            return bool(txt) and bool(num_re.match(txt.strip()))
+
+        # En-têtes uniques (contrainte d'un tableau Excel)
+        uniq, seen = [], {}
+        for hpos, htxt in enumerate(headers):
+            h = htxt if htxt else f'Col{hpos + 1}'
+            if h in seen:
+                seen[h] += 1
+                h = f'{h} ({seen[h]})'
+            else:
+                seen[h] = 1
+            uniq.append(h)
+
+        def cell_xml(ref_, txt):
+            if is_num(txt):
+                return f'<c r="{ref_}"><v>{txt.strip().replace(",", ".")}</v></c>'
+            return (f'<c r="{ref_}" t="inlineStr">'
+                    f'<is><t xml:space="preserve">{esc(txt)}</t></is></c>')
+
+        # Lignes de la feuille
+        sheet_rows = []
+        header_cells = ''.join(
+            cell_xml(f'{col_letter(c + 1)}1', uniq[c]) for c in range(ncols))
+        sheet_rows.append(f'<row r="1">{header_cells}</row>')
+        for ri, rdata in enumerate(rows, start=2):
+            cells = ''.join(
+                cell_xml(f'{col_letter(c + 1)}{ri}',
+                         rdata[c] if c < len(rdata) else '')
+                for c in range(ncols))
+            sheet_rows.append(f'<row r="{ri}">{cells}</row>')
+        sheet_data = ''.join(sheet_rows)
+
+        # Colonnes du tableau
+        table_cols = ''.join(
+            f'<tableColumn id="{c + 1}" name="{esc(uniq[c])}"/>'
+            for c in range(ncols))
+
+        # Noms sûrs pour la feuille et le tableau
+        sheet_name = re.sub(r'[\[\]:\*\?/\\]', '_', name)[:31] or 'Export'
+        table_disp = re.sub(r'[^A-Za-z0-9_]', '_', name) or 'Export'
+        if not re.match(r'^[A-Za-z_]', table_disp):
+            table_disp = 'T_' + table_disp
+
+        content_types = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+            '<Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>'
+            '</Types>'
+        )
+        rels = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            '</Relationships>'
+        )
+        workbook = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f'<sheets><sheet name="{esc(sheet_name)}" sheetId="1" r:id="rId1"/></sheets>'
+            '</workbook>'
+        )
+        wb_rels = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+            '</Relationships>'
+        )
+        styles = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+            '<fills count="2"><fill><patternFill patternType="none"/></fill>'
+            '<fill><patternFill patternType="gray125"/></fill></fills>'
+            '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+            '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+            '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+            '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+            '</styleSheet>'
+        )
+        worksheet = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f'<dimension ref="{ref}"/>'
+            f'<sheetData>{sheet_data}</sheetData>'
+            '<tableParts count="1"><tablePart r:id="rId1"/></tableParts>'
+            '</worksheet>'
+        )
+        sheet_rels = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/>'
+            '</Relationships>'
+        )
+        table = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            f'id="1" name="{esc(table_disp)}" displayName="{esc(table_disp)}" '
+            f'ref="{ref}" totalsRowShown="0">'
+            f'<autoFilter ref="{ref}"/>'
+            f'<tableColumns count="{ncols}">{table_cols}</tableColumns>'
+            '<tableStyleInfo name="TableStyleMedium2" showFirstColumn="0" '
+            'showLastColumn="0" showRowStripes="1" showColumnStripes="0"/>'
+            '</table>'
+        )
+
+        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr('[Content_Types].xml', content_types)
+            z.writestr('_rels/.rels', rels)
+            z.writestr('xl/workbook.xml', workbook)
+            z.writestr('xl/_rels/workbook.xml.rels', wb_rels)
+            z.writestr('xl/styles.xml', styles)
+            z.writestr('xl/worksheets/sheet1.xml', worksheet)
+            z.writestr('xl/worksheets/_rels/sheet1.xml.rels', sheet_rels)
+            z.writestr('xl/tables/table1.xml', table)
 
     def _export_shp(self, tbl, name, include_col4_fid=False):
         """Export visible table rows as Shapefile(s), one file per source layer."""
