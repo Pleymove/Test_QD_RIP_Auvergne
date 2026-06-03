@@ -1176,8 +1176,12 @@ class QDRIPDialog(QDialog):
                     nearest_fid  = ifid
 
             nf = infra_fd[nearest_fid] if nearest_fid is not None else None
+            bal_gid = (str(bal_ft['gid'])
+                       if 'gid' in _bal_fn and bal_ft['gid'] is not None
+                       else str(bal_ft.id()))
             results.append(dict(
                 bal_fid        = bal_ft.id(),
+                bal_gid        = bal_gid,
                 bal_layer_id   = bal_lyr.id(),
                 bal_sro        = bal_sro,
                 nb_voisins     = nb_voisins,
@@ -1205,7 +1209,7 @@ class QDRIPDialog(QDialog):
 
             dist_s = f"{r['dist_infra']:.1f}" if r['infra_fid'] >= 0 else 'N/A'
             cells = [
-                _si(r['bal_fid']),
+                _si(r['bal_gid']),
                 _si(r['bal_sro']),
                 _si(r['infra_fid'] if r['infra_fid'] >= 0 else 'N/A'),
                 _ni(dist_s),
