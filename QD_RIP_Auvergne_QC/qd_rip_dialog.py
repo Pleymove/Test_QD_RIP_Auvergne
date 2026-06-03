@@ -26,6 +26,7 @@ from qgis.PyQt.QtGui import QColor, QBrush, QFont, QDesktopServices
 
 from qgis.core import (
     QgsProject, QgsSpatialIndex, QgsFeatureRequest, QgsRectangle,
+    QgsVectorFileWriter,
 )
 from qgis.gui import QgsMapLayerComboBox
 from qgis.utils import iface
@@ -388,6 +389,10 @@ class QDRIPDialog(QDialog):
         bz.clicked.connect(lambda: self._zoom_selected(self.tbl_chev))
         bs.clicked.connect(lambda: self._select_qgis(self.tbl_chev))
         bc.clicked.connect(lambda: self._export_csv(self.tbl_chev, 'chevauchements'))
+        btn_shp_chev = QPushButton('🗺  Exporter SHP')
+        btn_shp_chev.setToolTip('Exporter les entités visibles en Shapefile')
+        btn_shp_chev.clicked.connect(lambda: self._export_shp(self.tbl_chev, 'chevauchements'))
+        ab.layout().addWidget(btn_shp_chev)
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -472,6 +477,10 @@ class QDRIPDialog(QDialog):
         ))
         bs.clicked.connect(lambda: self._select_qgis_doub())
         bc.clicked.connect(lambda: self._export_csv(self.tbl_doub, 'doublons'))
+        btn_shp_doub = QPushButton('🗺  Exporter SHP')
+        btn_shp_doub.setToolTip('Exporter les entités visibles en Shapefile')
+        btn_shp_doub.clicked.connect(lambda: self._export_shp(self.tbl_doub, 'doublons', include_col4_fid=True))
+        ab.layout().addWidget(btn_shp_doub)
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -542,6 +551,10 @@ class QDRIPDialog(QDialog):
         bz.clicked.connect(lambda: self._zoom_selected(self.tbl_parc))
         bs.clicked.connect(lambda: self._select_qgis(self.tbl_parc))
         bc.clicked.connect(lambda: self._export_csv(self.tbl_parc, 'parcours_longs'))
+        btn_shp_parc = QPushButton('🗺  Exporter SHP')
+        btn_shp_parc.setToolTip('Exporter les entités visibles en Shapefile')
+        btn_shp_parc.clicked.connect(lambda: self._export_shp(self.tbl_parc, 'parcours_longs'))
+        ab.layout().addWidget(btn_shp_parc)
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -656,6 +669,10 @@ class QDRIPDialog(QDialog):
         bz.clicked.connect(lambda: self._zoom_selected(self.tbl_bal))
         bs.clicked.connect(lambda: self._select_qgis(self.tbl_bal))
         bc.clicked.connect(lambda: self._export_csv(self.tbl_bal, 'bal_isolees'))
+        btn_shp_bal = QPushButton('🗺  Exporter SHP')
+        btn_shp_bal.setToolTip('Exporter les entités visibles en Shapefile')
+        btn_shp_bal.clicked.connect(lambda: self._export_shp(self.tbl_bal, 'bal_isolees'))
+        ab.layout().addWidget(btn_shp_bal)
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -1381,6 +1398,83 @@ class QDRIPDialog(QDialog):
             QMessageBox.information(self, 'Export', f'Fichier exporté :\n{path}')
         except Exception as e:
             QMessageBox.critical(self, 'Erreur export', str(e))
+
+    def _export_shp(self, tbl, name, include_col4_fid=False):
+        """Export visible table rows as Shapefile(s), one file per source layer."""
+        layer_fids = {}
+        for row in range(tbl.rowCount()):
+            if tbl.isRowHidden(row):
+                continue
+            item0 = tbl.item(row, 0)
+            if not item0:
+                continue
+            fid      = item0.data(Qt.ItemDataRole.UserRole + 1)
+            layer_id = item0.data(Qt.ItemDataRole.UserRole + 2)
+            if fid is None or not layer_id:
+                continue
+            layer_fids.setdefault(layer_id, set()).add(fid)
+            if include_col4_fid:
+                item4 = tbl.item(row, 4)
+                if item4:
+                    fid2 = item4.data(Qt.ItemDataRole.UserRole + 1)
+                    if fid2 is not None:
+                        layer_fids[layer_id].add(fid2)
+
+        if not layer_fids:
+            QMessageBox.information(self, 'Export SHP', 'Aucune entité à exporter.')
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Exporter SHP', f'{name}.shp', 'Shapefile (*.shp)')
+        if not path:
+            return
+        if not path.lower().endswith('.shp'):
+            path += '.shp'
+        base = path[:-4]
+
+        exported = []
+        errors   = []
+
+        for layer_id, fids in layer_fids.items():
+            lyr = QgsProject.instance().mapLayer(layer_id)
+            if not lyr:
+                errors.append(f'Couche introuvable : {layer_id}')
+                continue
+
+            out_path = path if len(layer_fids) == 1 else (
+                f'{base}_{lyr.name().replace(" ", "_").replace("/", "_")}.shp'
+            )
+
+            lyr.selectByIds(list(fids))
+            try:
+                opts = QgsVectorFileWriter.SaveVectorOptions()
+                opts.driverName = 'ESRI Shapefile'
+                opts.fileEncoding = 'UTF-8'
+                opts.onlySelectedFeatures = True
+                result = QgsVectorFileWriter.writeAsVectorFormatV3(
+                    lyr, out_path, lyr.transformContext(), opts)
+                err_code = result[0]
+                err_msg  = result[1] if len(result) > 1 else ''
+                try:
+                    no_error = (err_code == QgsVectorFileWriter.WriterError.NoError)
+                except AttributeError:
+                    no_error = (err_code == 0)
+                if no_error:
+                    exported.append(out_path)
+                else:
+                    errors.append(f'{lyr.name()} : {err_msg}')
+            except Exception as e:
+                errors.append(f'{lyr.name()} : {e}')
+            finally:
+                lyr.removeSelection()
+
+        if exported:
+            msg = 'Fichier(s) exporté(s) :\n' + '\n'.join(exported)
+            if errors:
+                msg += '\n\nErreur(s) :\n' + '\n'.join(errors)
+            QMessageBox.information(self, 'Export SHP', msg)
+        else:
+            QMessageBox.critical(self, 'Export SHP', 'Erreur(s) :\n' + '\n'.join(errors))
 
     # ─────────────────────────────────────────────────────────────────────────
     # ─────────────────────────────────────────────────────────────────────────
