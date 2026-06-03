@@ -1434,6 +1434,7 @@ class QDRIPDialog(QDialog):
 
         exported = []
         errors   = []
+        skipped  = []   # (couche, nb) entités sans géométrie valide, ignorées par le SHP
 
         for layer_id, fids in layer_fids.items():
             lyr = QgsProject.instance().mapLayer(layer_id)
@@ -1444,6 +1445,17 @@ class QDRIPDialog(QDialog):
             out_path = path if len(layer_fids) == 1 else (
                 f'{base}_{lyr.name().replace(" ", "_").replace("/", "_")}.shp'
             )
+
+            # Détecter les entités sans géométrie valide : elles sont présentes
+            # dans le CSV mais ignorées par le pilote Shapefile.
+            no_geom = []
+            req = QgsFeatureRequest().setFilterFids(list(fids))
+            for ft in lyr.getFeatures(req):
+                g = ft.geometry()
+                if g is None or g.isEmpty() or g.isNull():
+                    no_geom.append(ft.id())
+            if no_geom:
+                skipped.append((lyr.name(), len(no_geom)))
 
             lyr.selectByIds(list(fids))
             try:
@@ -1470,6 +1482,13 @@ class QDRIPDialog(QDialog):
 
         if exported:
             msg = 'Fichier(s) exporté(s) :\n' + '\n'.join(exported)
+            if skipped:
+                detail = '\n'.join(f'  • {nm} : {nb}' for nm, nb in skipped)
+                total = sum(nb for _, nb in skipped)
+                msg += (
+                    f'\n\n⚠ {total} entité(s) ignorée(s) (géométrie nulle/invalide, '
+                    f'donc absente(s) du SHP mais présente(s) dans le CSV) :\n{detail}'
+                )
             if errors:
                 msg += '\n\nErreur(s) :\n' + '\n'.join(errors)
             QMessageBox.information(self, 'Export SHP', msg)
