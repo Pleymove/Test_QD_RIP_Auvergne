@@ -652,11 +652,11 @@ class QDRIPDialog(QDialog):
         sh.addWidget(self.lbl_cnt_bal)
         rv.addLayout(sh)
 
-        self.tbl_bal = QTableWidget(0, 9)
+        self.tbl_bal = QTableWidget(0, 8)
         self.tbl_bal.setHorizontalHeaderLabels([
-            'ID BAL', 'Nb voisins BAL',
+            'ID BAL', 'SRO BAL',
             'ID Infra proche', 'Dist. infra (m)', 'Long. infra (m)',
-            'NRO infra', 'SRO infra', 'id_pa infra',
+            'SRO infra', 'id_pa infra',
             'Type infra',   # C0, C1, E0, E1...
         ])
         self._style_table(self.tbl_bal)
@@ -1180,6 +1180,7 @@ class QDRIPDialog(QDialog):
             results.append(dict(
                 bal_fid        = bal_ft.id(),
                 bal_layer_id   = bal_lyr.id(),
+                bal_sro        = bal_sro,
                 nb_voisins     = nb_voisins,
                 infra_fid      = nearest_fid if nf is not None else -1,
                 dist_infra     = nearest_dist if nf is not None else float('inf'),
@@ -1206,11 +1207,10 @@ class QDRIPDialog(QDialog):
             dist_s = f"{r['dist_infra']:.1f}" if r['infra_fid'] >= 0 else 'N/A'
             cells = [
                 _si(r['bal_fid']),
-                _ni(r['nb_voisins']),
+                _si(r['bal_sro']),
                 _si(r['infra_fid'] if r['infra_fid'] >= 0 else 'N/A'),
                 _ni(dist_s),
                 _ni(f"{r['infra_long']:.1f}"),
-                _si(r['infra_nro']),
                 _si(r['infra_sro']),
                 _si(r['infra_idpa']),
                 _si(r['infra_type']),   # C0, C1, E0, E1...
@@ -1350,7 +1350,7 @@ class QDRIPDialog(QDialog):
         iface.setActiveLayer(lyr)
 
     def _filter_bal_table(self):
-        """Filter BAL table by text search AND infra type combo (col 8)."""
+        """Filter BAL table by text search AND infra type combo (col 7)."""
         text     = self.le_srch_bal.text().lower()
         sel_type = self.cmb_bal_type.currentText()
         use_type = sel_type not in ('', '(tous)')
@@ -1364,7 +1364,7 @@ class QDRIPDialog(QDialog):
             else:
                 text_ok = True
             if use_type:
-                cell = self.tbl_bal.item(row, 8)   # Type infra column
+                cell = self.tbl_bal.item(row, 7)   # Type infra column
                 type_ok = sel_type == (cell.text() if cell else '')
             else:
                 type_ok = True
@@ -1401,7 +1401,8 @@ class QDRIPDialog(QDialog):
 
     def _export_shp(self, tbl, name, include_col4_fid=False):
         """Export visible table rows as Shapefile(s), one file per source layer."""
-        layer_fids = {}
+        layer_fids   = {}
+        fid_display  = {}   # (layer_id, fid) -> ID affiché dans le tableau
         for row in range(tbl.rowCount()):
             if tbl.isRowHidden(row):
                 continue
@@ -1413,12 +1414,14 @@ class QDRIPDialog(QDialog):
             if fid is None or not layer_id:
                 continue
             layer_fids.setdefault(layer_id, set()).add(fid)
+            fid_display[(layer_id, fid)] = item0.text()
             if include_col4_fid:
                 item4 = tbl.item(row, 4)
                 if item4:
                     fid2 = item4.data(Qt.ItemDataRole.UserRole + 1)
                     if fid2 is not None:
                         layer_fids[layer_id].add(fid2)
+                        fid_display[(layer_id, fid2)] = item4.text()
 
         if not layer_fids:
             QMessageBox.information(self, 'Export SHP', 'Aucune entité à exporter.')
@@ -1434,6 +1437,7 @@ class QDRIPDialog(QDialog):
 
         exported = []
         errors   = []
+        skipped  = []   # (couche, [IDs affichés]) entités sans géométrie, ignorées par le SHP
 
         for layer_id, fids in layer_fids.items():
             lyr = QgsProject.instance().mapLayer(layer_id)
@@ -1444,6 +1448,17 @@ class QDRIPDialog(QDialog):
             out_path = path if len(layer_fids) == 1 else (
                 f'{base}_{lyr.name().replace(" ", "_").replace("/", "_")}.shp'
             )
+
+            # Détecter les entités sans géométrie valide : elles sont présentes
+            # dans le CSV mais ignorées par le pilote Shapefile.
+            no_geom = []
+            req = QgsFeatureRequest().setFilterFids(list(fids))
+            for ft in lyr.getFeatures(req):
+                g = ft.geometry()
+                if g is None or g.isEmpty() or g.isNull():
+                    no_geom.append(fid_display.get((layer_id, ft.id()), str(ft.id())))
+            if no_geom:
+                skipped.append((lyr.name(), sorted(no_geom)))
 
             lyr.selectByIds(list(fids))
             try:
@@ -1472,9 +1487,61 @@ class QDRIPDialog(QDialog):
             msg = 'Fichier(s) exporté(s) :\n' + '\n'.join(exported)
             if errors:
                 msg += '\n\nErreur(s) :\n' + '\n'.join(errors)
-            QMessageBox.information(self, 'Export SHP', msg)
+            if skipped:
+                self._show_shp_skipped_dialog(msg, skipped)
+            else:
+                QMessageBox.information(self, 'Export SHP', msg)
         else:
             QMessageBox.critical(self, 'Export SHP', 'Erreur(s) :\n' + '\n'.join(errors))
+
+    def _show_shp_skipped_dialog(self, summary, skipped):
+        """Affiche le résultat de l'export + la liste copiable des IDs ignorés."""
+        total = sum(len(ids) for _, ids in skipped)
+
+        # Liste détaillée copiable (une section par couche)
+        blocks = []
+        flat_ids = []
+        for nm, ids in skipped:
+            flat_ids.extend(ids)
+            blocks.append(f'# {nm} ({len(ids)} entité(s))\n' + '\n'.join(ids))
+        detail_text = '\n\n'.join(blocks)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Export SHP – entités ignorées')
+        dlg.resize(440, 420)
+        v = QVBoxLayout(dlg)
+
+        v.addWidget(QLabel(summary))
+
+        warn = QLabel(
+            f'⚠ <b>{total} entité(s) ignorée(s)</b> : géométrie nulle ou invalide, '
+            f'donc absente(s) du Shapefile mais présente(s) dans le CSV.<br>'
+            f'IDs ci-dessous (sélectionnables / copiables) :'
+        )
+        warn.setWordWrap(True)
+        v.addWidget(warn)
+
+        txt = QPlainTextEdit()
+        txt.setReadOnly(True)
+        txt.setPlainText(detail_text)
+        txt.setStyleSheet('font-family: monospace;')
+        v.addWidget(txt, 1)
+
+        bar = QHBoxLayout()
+        btn_copy = QPushButton('📋  Copier les IDs')
+
+        def _copy():
+            QApplication.clipboard().setText('\n'.join(flat_ids))
+            btn_copy.setText('✓  Copié')
+        btn_copy.clicked.connect(_copy)
+        bar.addWidget(btn_copy)
+        bar.addStretch()
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        bb.accepted.connect(dlg.accept)
+        bar.addWidget(bb)
+        v.addLayout(bar)
+
+        dlg.exec()
 
     # ─────────────────────────────────────────────────────────────────────────
     # ─────────────────────────────────────────────────────────────────────────
