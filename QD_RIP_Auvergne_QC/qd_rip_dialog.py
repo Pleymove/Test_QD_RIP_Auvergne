@@ -5,6 +5,7 @@ Onglets :
   2. Doublons dans l'infra (parcours superposés)
   3. Parcours les plus longs
   4. BAL isolées (aucun voisin BAL dans un rayon donné)
+  5. PA sans infra (ZAPA sans infra dans le groupement livrables)
 """
 
 import os
@@ -25,7 +26,7 @@ from qgis.PyQt.QtGui import QColor, QBrush, QFont, QDesktopServices
 
 from qgis.core import (
     QgsProject, QgsSpatialIndex, QgsFeatureRequest, QgsRectangle,
-    QgsVectorFileWriter,
+    QgsVectorFileWriter, QgsFeature, QgsCoordinateTransform,
 )
 from qgis.gui import QgsMapLayerComboBox
 from qgis.utils import iface
@@ -78,13 +79,15 @@ class QDRIPDialog(QDialog):
 
     # Name fragments used to auto-select layers on startup
     _LAYER_HINTS = {
-        'infra':        ['infra_c03e1bf7', 'infra'],
-        'ft_arciti':    ['ft_arciti_53374007', 'ft_arciti'],
-        'bt':           ['bt_def0d723', 'bt'],
-        'athd_artere':  ['athd_artere_ab4dbaf5', 'athd_artere'],
-        't_cheminement':['t_cheminement_aa3c43e0', 't_cheminement'],
-        'bal':          ['bal_442ddc78', 'bal'],
-        'za_sro':       ['za_sro'],
+        'infra':           ['infra_c03e1bf7', 'infra'],
+        'ft_arciti':       ['ft_arciti_53374007', 'ft_arciti'],
+        'bt':              ['bt_def0d723', 'bt'],
+        'athd_artere':     ['athd_artere_ab4dbaf5', 'athd_artere'],
+        't_cheminement':   ['t_cheminement_aa3c43e0', 't_cheminement'],
+        'bal':             ['bal_442ddc78', 'bal'],
+        'za_sro':          ['za_sro'],
+        'livrable_zapa':   ['livrable_zapa'],
+        'livrable_infra':  ['livrable_infra'],
     }
 
     def __init__(self, parent=None):
@@ -140,6 +143,14 @@ class QDRIPDialog(QDialog):
         if zasro:
             self.cb_zasro.setLayer(zasro)
 
+        liv_zapa = self._find_layer(*hints['livrable_zapa'])
+        if liv_zapa:
+            self.cb_zapa.setLayer(liv_zapa)
+
+        liv_infra = self._find_layer(*hints['livrable_infra'])
+        if liv_infra:
+            self.cb_infra_pa.setLayer(liv_infra)
+
     # ─── top-level UI ────────────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -165,11 +176,12 @@ class QDRIPDialog(QDialog):
         self._refresh_pm_label()
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._tab_chevauchement(), '⚠  Chevauchements C0 / Existant')
-        self.tabs.addTab(self._tab_doublons(),       '⛔  Doublons Infra')
-        self.tabs.addTab(self._tab_parcours(),       '📏  Parcours les plus longs')
-        self.tabs.addTab(self._tab_bal(),            '📍  BAL Isolées')
-        self.tabs.addTab(self._tab_rapport(),        '📊  Tableau de bord')
+        self.tabs.addTab(self._tab_chevauchement(),    '⚠  Chevauchements C0 / Existant')
+        self.tabs.addTab(self._tab_doublons(),         '⛔  Doublons Infra')
+        self.tabs.addTab(self._tab_parcours(),         '📏  Parcours les plus longs')
+        self.tabs.addTab(self._tab_bal(),              '📍  BAL Isolées')
+        self.tabs.addTab(self._tab_pa_sans_infra(),    '🚫  PA sans infra')
+        self.tabs.addTab(self._tab_rapport(),          '📊  Tableau de bord')
         root.addWidget(self.tabs)
 
         bar = QHBoxLayout()
@@ -1709,8 +1721,348 @@ class QDRIPDialog(QDialog):
         dlg.exec()
 
     # ─────────────────────────────────────────────────────────────────────────
+    # TAB 5 – PA sans infra
     # ─────────────────────────────────────────────────────────────────────────
-    # TAB 5 – Tableau de bord (in-app live report)
+    def _tab_pa_sans_infra(self):
+        root = QWidget()
+        h = QHBoxLayout(root)
+
+        cfg = QGroupBox('Configuration')
+        cfg.setFixedWidth(290)
+        vbox = QVBoxLayout(cfg)
+
+        frm = QFormLayout()
+
+        self.cb_zapa = QgsMapLayerComboBox()
+        self.cb_zapa.setFilters(_F_POLY)
+        self.cb_zapa.setToolTip('Couche polygonale ZAPA livrable (champs : id_metier, sro).')
+        frm.addRow('Couche ZAPA :', self.cb_zapa)
+
+        self.cb_infra_pa = QgsMapLayerComboBox()
+        self.cb_infra_pa.setFilters(_F_LINE)
+        self.cb_infra_pa.setToolTip('Couche linéaire infra livrable (champ : id_pa).')
+        frm.addRow('Couche Infra :', self.cb_infra_pa)
+
+        self.sp_tol_pa = QSpinBox()
+        self.sp_tol_pa.setRange(0, 500)
+        self.sp_tol_pa.setValue(1)
+        self.sp_tol_pa.setSuffix(' m')
+        self.sp_tol_pa.setToolTip(
+            'Buffer appliqué à la ZAPA pour le contrôle spatial.\n'
+            '0 = intersection stricte, 1 m = léger buffer contre les micro-décalages.'
+        )
+        frm.addRow('Tolérance spatiale :', self.sp_tol_pa)
+
+        vbox.addLayout(frm)
+
+        self.chk_discord = QCheckBox('Inclure les discordances')
+        self.chk_discord.setToolTip(
+            'Affiche aussi les ZAPA où le contrôle attributaire (id_pa)\n'
+            'et le contrôle spatial (intersection) se contredisent :\n'
+            '• Discordance attributaire : pas d\'id_pa mais infra spatiale trouvée\n'
+            '• Discordance spatiale : id_pa trouvé mais aucune infra intersectante'
+        )
+        vbox.addWidget(self.chk_discord)
+
+        info = QLabel(
+            '<small><i>Périmètre : liste PM actuelle du plugin.<br>'
+            'Champs requis — ZAPA : <b>id_metier</b>, <b>sro</b>.<br>'
+            'Infra livrable : <b>id_pa</b>.</i></small>'
+        )
+        info.setWordWrap(True)
+        vbox.addWidget(info)
+        vbox.addStretch()
+
+        btn_run = QPushButton('▶  Lancer l\'analyse')
+        btn_run.setStyleSheet('font-weight:bold; padding:6px;')
+        btn_run.clicked.connect(self._run_pa_sans_infra)
+        vbox.addWidget(btn_run)
+        h.addWidget(cfg)
+
+        res = QWidget()
+        rv = QVBoxLayout(res)
+        rv.setContentsMargins(0, 0, 0, 0)
+
+        sh = QHBoxLayout()
+        sh.addWidget(QLabel('Recherche :'))
+        self.le_srch_pa = QLineEdit()
+        self.le_srch_pa.setPlaceholderText('Filtrer…')
+        self.le_srch_pa.textChanged.connect(
+            lambda txt: self._filter_table(self.tbl_pa, txt))
+        sh.addWidget(self.le_srch_pa, 1)
+        self.lbl_cnt_pa = QLabel('—')
+        sh.addWidget(self.lbl_cnt_pa)
+        rv.addLayout(sh)
+
+        self.tbl_pa = QTableWidget(0, 7)
+        self.tbl_pa.setHorizontalHeaderLabels([
+            'SRO / PM', 'ID ZAPA / PA',
+            'Nb infra attr.', 'Long. attr. (m)',
+            'Nb infra spatiale', 'Long. spatiale (m)',
+            'Diagnostic',
+        ])
+        self._style_table(self.tbl_pa)
+        self.tbl_pa.doubleClicked.connect(
+            lambda idx: self._zoom_row(self.tbl_pa, idx.row())
+        )
+        rv.addWidget(self.tbl_pa)
+
+        ab, bz, bs, bc = self._action_bar(self.tbl_pa, 'pa')
+        bz.clicked.connect(lambda: self._zoom_selected(self.tbl_pa))
+        bs.clicked.connect(lambda: self._select_qgis(self.tbl_pa))
+        bc.clicked.connect(lambda: self._export_xlsx(self.tbl_pa, 'pa_sans_infra'))
+        btn_shp_pa = QPushButton('🗺  Exporter SHP')
+        btn_shp_pa.setToolTip('Exporter les ZAPA visibles en Shapefile')
+        btn_shp_pa.clicked.connect(
+            lambda: self._export_shp(self.tbl_pa, 'zapa_sans_infra'))
+        ab.layout().addWidget(btn_shp_pa)
+        rv.addWidget(ab)
+
+        h.addWidget(res, 1)
+        return root
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ANALYSIS – Tab 5: PA sans infra
+    # ─────────────────────────────────────────────────────────────────────────
+    def _run_pa_sans_infra(self):
+        zapa_lyr  = self.cb_zapa.currentLayer()
+        infra_lyr = self.cb_infra_pa.currentLayer()
+
+        if not zapa_lyr:
+            QMessageBox.warning(self, 'Erreur',
+                                'Sélectionnez la couche ZAPA livrable.')
+            return
+        if not infra_lyr:
+            QMessageBox.warning(self, 'Erreur',
+                                'Sélectionnez la couche Infra livrable.')
+            return
+
+        zapa_fnames  = zapa_lyr.fields().names()
+        infra_fnames = infra_lyr.fields().names()
+
+        missing = []
+        if 'id_metier' not in zapa_fnames:
+            missing.append('ZAPA : champ "id_metier" absent')
+        if 'sro' not in zapa_fnames:
+            missing.append('ZAPA : champ "sro" absent')
+        if 'id_pa' not in infra_fnames:
+            missing.append('Infra : champ "id_pa" absent')
+        if missing:
+            QMessageBox.warning(self, 'Champs requis manquants',
+                                '\n'.join(missing))
+            return
+
+        # Cet onglet filtre TOUJOURS sur la liste PM, indépendamment de chk_pm.
+        # Si la liste est vide, l'analyse est bloquée : sans périmètre les
+        # résultats seraient hors contexte.
+        if not self._pm_set:
+            QMessageBox.warning(
+                self, 'Périmètre PM vide',
+                'La liste PM du plugin est vide.\n'
+                'Cet onglet analyse uniquement les ZAPA du périmètre PM courant.\n'
+                'Ajoutez des PM via "Modifier la liste…" avant de lancer l\'analyse.')
+            return
+
+        tol          = self.sp_tol_pa.value()
+        incl_discord = self.chk_discord.isChecked()
+        has_infra_sro = 'sro' in infra_fnames
+
+        # CRS : transformer les géométries infra vers le CRS des ZAPA si besoin
+        need_transform = (zapa_lyr.crs().authid() != infra_lyr.crs().authid())
+        xform = None
+        if need_transform:
+            xform = QgsCoordinateTransform(
+                infra_lyr.crs(), zapa_lyr.crs(),
+                QgsProject.instance().transformContext())
+
+        self.lbl_status.setText('Chargement des infras livrables…')
+        QApplication.processEvents()
+
+        # ── Longueur d'une entité infra ───────────────────────────────────────
+        def _infra_len(ft, geom):
+            for fld in ('long', 'longueur'):
+                if fld in infra_fnames and ft[fld] is not None:
+                    try:
+                        return float(ft[fld])
+                    except (TypeError, ValueError):
+                        pass
+            return geom.length()
+
+        # ── Charger toutes les infras du périmètre ────────────────────────────
+        infra_idx       = QgsSpatialIndex()
+        infra_geoms     = {}   # fid → QgsGeometry (potentiellement transformée)
+        infra_feats     = {}   # fid → QgsFeature
+        infra_by_idpa   = {}   # str(id_pa) → [(fid, longueur)]
+        infra_sro_by_fid = {}  # fid → str(sro)
+
+        for ft in infra_lyr.getFeatures():
+            g = ft.geometry()
+            if g is None or g.isEmpty():
+                continue
+            if need_transform:
+                from qgis.core import QgsGeometry as _QgsGeometry
+                g = _QgsGeometry(g)
+                g.transform(xform)
+
+            # Filtre PM sur l'infra si le champ sro est présent (toujours actif)
+            if has_infra_sro:
+                sro_v = ft['sro']
+                if sro_v is None or str(sro_v).strip() not in self._pm_set:
+                    continue
+
+            fid = ft.id()
+            infra_geoms[fid] = g
+            infra_feats[fid] = ft
+
+            if has_infra_sro and ft['sro'] is not None:
+                infra_sro_by_fid[fid] = str(ft['sro']).strip()
+
+            id_pa_v = ft['id_pa']
+            if id_pa_v is not None:
+                key = str(id_pa_v).strip()
+                if key:
+                    infra_by_idpa.setdefault(key, []).append(
+                        (fid, _infra_len(ft, g)))
+
+            tmp = QgsFeature()
+            tmp.setId(fid)
+            tmp.setGeometry(g)
+            infra_idx.insertFeature(tmp)
+
+        # ── Charger les ZAPA du périmètre PM (filtre toujours actif) ─────────
+        # On filtre directement sur _pm_set sans passer par _in_pm/_chk_pm.
+        def _zapa_in_pm(ft):
+            val = ft['sro'] if 'sro' in zapa_fnames else None
+            return val is not None and str(val).strip() in self._pm_set
+
+        zapa_feats = [
+            ft for ft in zapa_lyr.getFeatures()
+            if _zapa_in_pm(ft)
+            and ft.geometry() is not None
+            and not ft.geometry().isEmpty()
+        ]
+
+        if not zapa_feats:
+            QMessageBox.information(
+                self, 'Info',
+                'Aucune ZAPA trouvée pour les PM de la liste courante.\n'
+                'Vérifiez que le champ "sro" de la couche ZAPA contient bien '
+                'des codes présents dans la liste PM du plugin.')
+            return
+
+        prog = QProgressDialog(
+            'Analyse PA sans infra…', 'Annuler', 0, len(zapa_feats), self)
+        prog.setWindowTitle('Analyse en cours')
+        prog.setMinimumDuration(0)
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+
+        results = []
+
+        for i, zapa_ft in enumerate(zapa_feats):
+            prog.setValue(i)
+            if prog.wasCanceled():
+                break
+            if i % 50 == 0:
+                prog.setLabelText(
+                    f'PA sans infra… {i}/{len(zapa_feats)} '
+                    f'({100 * i // len(zapa_feats)} %)')
+                QApplication.processEvents()
+
+            zapa_g    = zapa_ft.geometry()
+            id_metier = (str(zapa_ft['id_metier']).strip()
+                         if zapa_ft['id_metier'] is not None else '')
+            zapa_sro  = (str(zapa_ft['sro']).strip()
+                         if zapa_ft['sro'] is not None else '')
+
+            # ── Contrôle attributaire ─────────────────────────────────────────
+            attr_count = 0
+            attr_long  = 0.0
+            if id_metier:
+                for (fid, l) in infra_by_idpa.get(id_metier, []):
+                    if has_infra_sro and zapa_sro:
+                        isro = infra_sro_by_fid.get(fid, '')
+                        if isro and isro != zapa_sro:
+                            continue
+                    attr_count += 1
+                    attr_long  += l
+
+            # ── Contrôle spatial ──────────────────────────────────────────────
+            spatial_count = 0
+            spatial_long  = 0.0
+            search_g = zapa_g.buffer(tol, 5) if tol > 0 else zapa_g
+            bbox = search_g.boundingBox()
+            for ifid in infra_idx.intersects(bbox):
+                if search_g.intersects(infra_geoms[ifid]):
+                    spatial_count += 1
+                    spatial_long  += _infra_len(infra_feats[ifid],
+                                                infra_geoms[ifid])
+
+            # ── Diagnostic ───────────────────────────────────────────────────
+            if attr_count == 0 and spatial_count == 0:
+                diagnostic = 'SANS INFRA'
+            elif attr_count == 0 and spatial_count > 0:
+                diagnostic = 'Discordance attributaire'
+            elif attr_count > 0 and spatial_count == 0:
+                diagnostic = 'Discordance spatiale'
+            else:
+                continue  # ZAPA correctement rattachée des deux côtés
+
+            if diagnostic != 'SANS INFRA' and not incl_discord:
+                continue
+
+            results.append(dict(
+                sro           = zapa_sro,
+                id_zapa       = id_metier,
+                attr_count    = attr_count,
+                attr_long     = attr_long,
+                spatial_count = spatial_count,
+                spatial_long  = spatial_long,
+                diagnostic    = diagnostic,
+                fid           = zapa_ft.id(),
+                layer_id      = zapa_lyr.id(),
+            ))
+
+        prog.setValue(len(zapa_feats))
+
+        # ── Remplir le tableau ────────────────────────────────────────────────
+        self.tbl_pa.setSortingEnabled(False)
+        self.tbl_pa.setRowCount(0)
+
+        for r in results:
+            row = self.tbl_pa.rowCount()
+            self.tbl_pa.insertRow(row)
+            cells = [
+                _si(r['sro']),
+                _si(r['id_zapa']),
+                _ni(r['attr_count']),
+                _ni(f"{r['attr_long']:.1f}"),
+                _ni(r['spatial_count']),
+                _ni(f"{r['spatial_long']:.1f}"),
+                _si(r['diagnostic']),
+            ]
+            for col, item in enumerate(cells):
+                self.tbl_pa.setItem(row, col, item)
+            self.tbl_pa.item(row, 0).setData(
+                Qt.ItemDataRole.UserRole + 1, r['fid'])
+            self.tbl_pa.item(row, 0).setData(
+                Qt.ItemDataRole.UserRole + 2, r['layer_id'])
+
+        self.tbl_pa.setSortingEnabled(True)
+
+        n_sans  = sum(1 for r in results if r['diagnostic'] == 'SANS INFRA')
+        n_disc  = len(results) - n_sans
+        n_total = len(zapa_feats)
+        cnt_txt = f'{n_sans} ZAPA sans infra / {n_total} analysées'
+        if incl_discord and n_disc:
+            cnt_txt += f' + {n_disc} discordance(s)'
+        self.lbl_cnt_pa.setText(cnt_txt)
+        self.lbl_status.setText(
+            f'PA sans infra : {n_sans} ZAPA sans infra sur {n_total} analysées.')
+        self._refresh_rapport_tab()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 6 – Tableau de bord (in-app live report)
     # ─────────────────────────────────────────────────────────────────────────
 
     def _tab_rapport(self):
@@ -1750,20 +2102,27 @@ class QDRIPDialog(QDialog):
         doub = self._collect_table_data(self.tbl_doub)
         parc = self._collect_table_data(self.tbl_parc)
         bal  = self._collect_table_data(self.tbl_bal)
+        pa   = (self._collect_table_data(self.tbl_pa)
+                if hasattr(self, 'tbl_pa') else [])
         charts = self._make_charts(chev, doub, parc, bal)
-        self.tb_rapport.setHtml(self._build_tab_html(chev, doub, parc, bal, charts))
+        self.tb_rapport.setHtml(
+            self._build_tab_html(chev, doub, parc, bal, charts, pa=pa))
         now = datetime.datetime.now().strftime('%H:%M:%S')
         self.lbl_rapport_time.setText(f'Dernière actualisation : {now}')
         self.lbl_rapport_time.setStyleSheet('font-size: 11px;')
 
-    def _build_tab_html(self, chev, doub, parc, bal, charts):
+    def _build_tab_html(self, chev, doub, parc, bal, charts, pa=None):
         """Build QTextBrowser-compatible HTML for the in-app dashboard."""
+        if pa is None:
+            pa = []
         now = datetime.datetime.now().strftime('%d/%m/%Y à %H:%M')
 
         n_chev = len(chev)
         n_doub = len(doub)
         n_parc = len(parc)
         n_bal  = len(bal)
+        n_pa_sans = sum(
+            1 for r in pa if r.get('Diagnostic', '') == 'SANS INFRA')
 
         total_ov_chev = 0.0
         for r in chev:
@@ -1850,6 +2209,7 @@ class QDRIPDialog(QDialog):
             f'{_kpi(n_doub, "Doublons", _c(n_doub), f"{total_ov_doub:,.1f} m")}'
             f'{_kpi(n_parc, "Parcours listés", "#1a6faf", f"{total_len_parc:,.0f} m total")}'
             f'{_kpi(n_bal, "BAL isolées", _c(n_bal), avg_dist_bal or "—")}'
+            f'{_kpi(n_pa_sans, "PA sans infra", _c(n_pa_sans))}'
             f'</tr></table>'
         )
 
@@ -1900,6 +2260,17 @@ class QDRIPDialog(QDialog):
         )
         bal_section = _section('📍', 'BAL Isolées', '#e67e22', bal_body)
 
+        # ── PA sans infra ─────────────────────────────────────────────────────
+        n_disc_pa = len(pa) - n_pa_sans
+        pa_body = (
+            f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
+            f'{_kpi(n_pa_sans, "ZAPA sans infra", _c(n_pa_sans))}'
+            f'{_kpi(n_disc_pa, "Discordances", _c(n_disc_pa) if n_disc_pa else "#888888")}'
+            f'<td></td><td></td>'
+            f'</tr></table>'
+        )
+        pa_section = _section('🚫', 'PA sans infra', '#8e44ad', pa_body)
+
         return (
             '<!DOCTYPE html><html><head><meta charset="UTF-8"></head>'
             '<body style="background-color:#f8f9fa; font-family:Arial,sans-serif; '
@@ -1920,9 +2291,10 @@ class QDRIPDialog(QDialog):
             + doub_section
             + parc_section
             + bal_section
+            + pa_section
 
             + '<p style="font-size:10px; color:#aaaaaa; text-align:center; margin-top:8px;">'
-            'Plugin QD RIP Auvergne v1.0.8 — Pleymove</p>'
+            'Plugin QD RIP Auvergne v1.1.5 — Pleymove</p>'
             '</body></html>'
         )
 

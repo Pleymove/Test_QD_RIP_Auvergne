@@ -24,3 +24,25 @@ Plugin de contrôle qualité des données RIP Auvergne.
 | Doublons Infra | Paires d'entités C0 dont les tracés se superposent |
 | Parcours les plus longs | Classement par longueur décroissante (Top N configurable) |
 | BAL Isolées | BAL sans voisin dans un rayon configurable (défaut 500 m), corrélées avec l'infra C0 la plus proche et son linéaire |
+| PA sans infra | ZAPA du périmètre PM courant sans infra dans le groupement livrables (double contrôle attributaire id_pa + spatial) |
+| Tableau de bord | Synthèse des résultats des autres onglets avec indicateurs clés |
+
+## Changelog
+
+### Version 1.1.5
+- Ajout de l'onglet **PA sans infra** : contrôle des ZAPA du périmètre PM courant
+- Détection des ZAPA sans infra dans `livrable_infra` (via `livrable_zapa`)
+- Double contrôle : attributaire (`livrable_infra.id_pa ↔ livrable_zapa.id_metier`) et spatial (intersection ZAPA / infra avec tolérance configurable)
+- Résultat : une ligne par ZAPA
+- Option pour afficher les discordances attributaires / spatiales
+- Exports Excel, SHP des ZAPA visibles
+- Gestion automatique des CRS différents entre les deux couches
+
+### Version 1.1.4
+- Export Excel (.xlsx) en tableau structuré à la place du CSV sur tous les onglets
+
+### Version 1.1.3
+- Onglet BAL : colonne SRO BAL (vérification croisée) + export SHP avec liste des IDs ignorés copiable
+
+### Version 1.1.2
+- Bouton « Exporter SHP » sur tous les onglets d'analyse
