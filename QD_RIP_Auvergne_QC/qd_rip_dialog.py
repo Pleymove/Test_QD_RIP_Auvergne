@@ -2756,7 +2756,7 @@ class QDRIPDialog(QDialog):
                         if h > 0:
                             ax.text(p.get_x() + p.get_width() / 2., h,
                                     str(int(h)), ha='center', va='bottom', fontsize=7)
-                    ax.set_xlabel("Distance à l'infra C0 la plus proche (m)", fontsize=9)
+                    ax.set_xlabel("Distance à l'infra la plus proche (m)", fontsize=9)
                     ax.set_ylabel('Nombre de BAL', fontsize=9)
                     ax.set_title('Distribution des distances BAL → Infra', fontsize=11,
                                  fontweight='bold', pad=10)
