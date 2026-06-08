@@ -29,6 +29,12 @@ Plugin de contrôle qualité des données RIP Auvergne.
 
 ## Changelog
 
+### Version 1.1.6
+- Correction de l'auto-sélection des couches dans l'onglet **PA sans infra**
+- Nouvelle détection prioritaire : source PostGIS (`table="rad_aw_2026"."zapa"/"infra"`), puis nom exact (`zapa`/`infra` avec validation des champs), puis nom contenant `livrable_zapa`/`livrable_infra`
+- Mise à jour des libellés et tooltips des combos couche dans l'onglet PA sans infra
+- Messages d'erreur améliorés : affichent le nom de la couche sélectionnée en cas de champ manquant
+
 ### Version 1.1.5
 - Ajout de l'onglet **PA sans infra** : contrôle des ZAPA du périmètre PM courant
 - Détection des ZAPA sans infra dans `livrable_infra` (via `livrable_zapa`)
