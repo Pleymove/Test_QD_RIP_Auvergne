@@ -111,6 +111,106 @@ class QDRIPDialog(QDialog):
                     return lyr
         return None
 
+    # ── Smart detection helpers for PA sans infra tab ──────────────────────
+
+    def _layer_source_contains_table(self, lyr, table_fragment):
+        """Return True if the layer's PostGIS source string contains table_fragment."""
+        try:
+            src = lyr.source().lower()
+            return table_fragment.lower() in src
+        except Exception:
+            return False
+
+    def _has_fields(self, lyr, *field_names):
+        """Return True if lyr exposes all requested field names."""
+        try:
+            names = lyr.fields().names()
+            return all(f in names for f in field_names)
+        except Exception:
+            return False
+
+    def _find_pa_zapa_layer(self):
+        """Locate the ZAPA polygon layer for the PA sans infra tab.
+
+        Priority:
+          1. PostGIS source contains 'table="rad_aw_2026"."zapa"'
+          2. Exact name == 'zapa'  (polygon, has id_metier + sro)
+          3. Name contains 'livrable_zapa'
+        """
+        from qgis.core import QgsWkbTypes
+        candidates_p2 = []
+        candidates_p3 = []
+
+        for lyr in QgsProject.instance().mapLayers().values():
+            if not hasattr(lyr, 'geometryType'):
+                continue
+            try:
+                if lyr.geometryType() != QgsWkbTypes.GeometryType.PolygonGeometry:
+                    continue
+            except Exception:
+                continue
+
+            # Priority 1 — PostGIS source
+            if self._layer_source_contains_table(lyr, 'table="rad_aw_2026"."zapa"'):
+                return lyr
+
+            name = lyr.name().strip().lower()
+
+            # Priority 2 — exact name + field validation
+            if name == 'zapa' and self._has_fields(lyr, 'id_metier', 'sro'):
+                candidates_p2.append(lyr)
+
+            # Priority 3 — livrable_zapa substring
+            if 'livrable_zapa' in name:
+                candidates_p3.append(lyr)
+
+        if candidates_p2:
+            return candidates_p2[0]
+        if candidates_p3:
+            return candidates_p3[0]
+        return None
+
+    def _find_pa_infra_layer(self):
+        """Locate the infra line layer for the PA sans infra tab.
+
+        Priority:
+          1. PostGIS source contains 'table="rad_aw_2026"."infra"'
+          2. Exact name == 'infra'  (line, has id_pa)
+          3. Name contains 'livrable_infra'
+        """
+        from qgis.core import QgsWkbTypes
+        candidates_p2 = []
+        candidates_p3 = []
+
+        for lyr in QgsProject.instance().mapLayers().values():
+            if not hasattr(lyr, 'geometryType'):
+                continue
+            try:
+                if lyr.geometryType() != QgsWkbTypes.GeometryType.LineGeometry:
+                    continue
+            except Exception:
+                continue
+
+            # Priority 1 — PostGIS source
+            if self._layer_source_contains_table(lyr, 'table="rad_aw_2026"."infra"'):
+                return lyr
+
+            name = lyr.name().strip().lower()
+
+            # Priority 2 — exact name + field validation
+            if name == 'infra' and self._has_fields(lyr, 'id_pa'):
+                candidates_p2.append(lyr)
+
+            # Priority 3 — livrable_infra substring
+            if 'livrable_infra' in name:
+                candidates_p3.append(lyr)
+
+        if candidates_p2:
+            return candidates_p2[0]
+        if candidates_p3:
+            return candidates_p3[0]
+        return None
+
     def _auto_select_layers(self):
         hints = self._LAYER_HINTS
         infra = self._find_layer(*hints['infra'])
@@ -143,13 +243,13 @@ class QDRIPDialog(QDialog):
         if zasro:
             self.cb_zasro.setLayer(zasro)
 
-        liv_zapa = self._find_layer(*hints['livrable_zapa'])
-        if liv_zapa:
-            self.cb_zapa.setLayer(liv_zapa)
+        pa_zapa = self._find_pa_zapa_layer()
+        if pa_zapa:
+            self.cb_zapa.setLayer(pa_zapa)
 
-        liv_infra = self._find_layer(*hints['livrable_infra'])
-        if liv_infra:
-            self.cb_infra_pa.setLayer(liv_infra)
+        pa_infra = self._find_pa_infra_layer()
+        if pa_infra:
+            self.cb_infra_pa.setLayer(pa_infra)
 
     # ─── top-level UI ────────────────────────────────────────────────────────
 
@@ -1735,13 +1835,21 @@ class QDRIPDialog(QDialog):
 
         self.cb_zapa = QgsMapLayerComboBox()
         self.cb_zapa.setFilters(_F_POLY)
-        self.cb_zapa.setToolTip('Couche polygonale ZAPA livrable (champs : id_metier, sro).')
-        frm.addRow('Couche ZAPA :', self.cb_zapa)
+        self.cb_zapa.setToolTip(
+            'Couche polygonale zapa (champs requis : id_metier, sro).\n'
+            'Détection auto : source PostGIS table="rad_aw_2026"."zapa",\n'
+            'puis nom exact "zapa", puis nom contenant "livrable_zapa".'
+        )
+        frm.addRow('Couche zapa :', self.cb_zapa)
 
         self.cb_infra_pa = QgsMapLayerComboBox()
         self.cb_infra_pa.setFilters(_F_LINE)
-        self.cb_infra_pa.setToolTip('Couche linéaire infra livrable (champ : id_pa).')
-        frm.addRow('Couche Infra :', self.cb_infra_pa)
+        self.cb_infra_pa.setToolTip(
+            'Couche linéaire infra (champ requis : id_pa).\n'
+            'Détection auto : source PostGIS table="rad_aw_2026"."infra",\n'
+            'puis nom exact "infra", puis nom contenant "livrable_infra".'
+        )
+        frm.addRow('Couche infra :', self.cb_infra_pa)
 
         self.sp_tol_pa = QSpinBox()
         self.sp_tol_pa.setRange(0, 500)
@@ -1830,11 +1938,13 @@ class QDRIPDialog(QDialog):
 
         if not zapa_lyr:
             QMessageBox.warning(self, 'Erreur',
-                                'Sélectionnez la couche ZAPA livrable.')
+                                'Sélectionnez la couche zapa\n'
+                                '(polygone avec champs id_metier, sro).')
             return
         if not infra_lyr:
             QMessageBox.warning(self, 'Erreur',
-                                'Sélectionnez la couche Infra livrable.')
+                                'Sélectionnez la couche infra\n'
+                                '(linéaire avec champ id_pa).')
             return
 
         zapa_fnames  = zapa_lyr.fields().names()
@@ -1842,11 +1952,11 @@ class QDRIPDialog(QDialog):
 
         missing = []
         if 'id_metier' not in zapa_fnames:
-            missing.append('ZAPA : champ "id_metier" absent')
+            missing.append(f'Couche zapa "{zapa_lyr.name()}" : champ "id_metier" absent')
         if 'sro' not in zapa_fnames:
-            missing.append('ZAPA : champ "sro" absent')
+            missing.append(f'Couche zapa "{zapa_lyr.name()}" : champ "sro" absent')
         if 'id_pa' not in infra_fnames:
-            missing.append('Infra : champ "id_pa" absent')
+            missing.append(f'Couche infra "{infra_lyr.name()}" : champ "id_pa" absent')
         if missing:
             QMessageBox.warning(self, 'Champs requis manquants',
                                 '\n'.join(missing))
