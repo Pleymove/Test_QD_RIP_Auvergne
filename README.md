@@ -23,11 +23,19 @@ Plugin de contrôle qualité des données RIP Auvergne.
 | Chevauchements C0 / Existant | Détecte les infra C0 qui passent sur `ft_arciti`, `bt`, `athd_artere` (filtre `dispopp_ar != 0`) ou `t_cheminement` |
 | Doublons Infra | Paires d'entités C0 dont les tracés se superposent |
 | Parcours les plus longs | Classement par longueur décroissante (Top N configurable) |
-| BAL Isolées | BAL sans voisin dans un rayon configurable (défaut 500 m), corrélées avec l'infra C0 la plus proche et son linéaire |
+| BAL éloignées infra | Contrôle de la distance BAL→infra par PM. Mode isolation (rayon 500 m par défaut) ou analyse globale. Filtre distance infra configurable (défaut 1000 m) |
 | PA sans infra | ZAPA du périmètre PM courant sans infra dans le groupement livrables (double contrôle attributaire id_pa + spatial) |
 | Tableau de bord | Synthèse des résultats des autres onglets avec indicateurs clés |
 
 ## Changelog
+
+### Version 1.1.8
+- Renommage de l'onglet **BAL isolées** en **BAL éloignées infra**
+- Ajout d'un mode permettant d'analyser toutes les BAL du périmètre PM sans appliquer le rayon d'isolation (option « Utiliser le rayon d'isolation », cochée par défaut à 500 m)
+- Ajout d'un filtre facultatif sur la distance à l'infra la plus proche dans le même PM (option « Filtrer par distance », cochée par défaut à 1000 m)
+- Les seuils sont librement saisissables (plage 0–999 999 999 m)
+- Les BAL sans infra trouvée dans leur PM sont toujours remontées quel que soit le filtre distance
+- Mise à jour des compteurs, exports (renommés `bal_eloignees`) et tableau de bord
 
 ### Version 1.1.7
 - Correction de l'onglet **PA sans infra** : exclusion des ZAPA sans BAL
