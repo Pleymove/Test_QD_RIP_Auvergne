@@ -86,7 +86,7 @@ class QDRIPDialog(QDialog):
         't_cheminement':   ['t_cheminement_aa3c43e0', 't_cheminement'],
         'bal':             ['bal_442ddc78', 'bal'],
         'za_sro':          ['za_sro'],
-        'livrable_zapa':   ['livrable_zapa', 'zapa'],
+        'livrable_zapa':   ['livrable_zapa'],
         'livrable_infra':  ['livrable_infra'],
     }
 
@@ -1852,11 +1852,15 @@ class QDRIPDialog(QDialog):
                                 '\n'.join(missing))
             return
 
-        if self.chk_pm.isChecked() and not self._pm_set:
+        # Cet onglet filtre TOUJOURS sur la liste PM, indépendamment de chk_pm.
+        # Si la liste est vide, l'analyse est bloquée : sans périmètre les
+        # résultats seraient hors contexte.
+        if not self._pm_set:
             QMessageBox.warning(
                 self, 'Périmètre PM vide',
                 'La liste PM du plugin est vide.\n'
-                'Ajoutez des PM ou décochez "Restreindre au périmètre PM".')
+                'Cet onglet analyse uniquement les ZAPA du périmètre PM courant.\n'
+                'Ajoutez des PM via "Modifier la liste…" avant de lancer l\'analyse.')
             return
 
         tol          = self.sp_tol_pa.value()
@@ -1900,8 +1904,8 @@ class QDRIPDialog(QDialog):
                 g = _QgsGeometry(g)
                 g.transform(xform)
 
-            # Filtre PM sur l'infra si le champ sro est présent
-            if has_infra_sro and self.chk_pm.isChecked() and self._pm_set:
+            # Filtre PM sur l'infra si le champ sro est présent (toujours actif)
+            if has_infra_sro:
                 sro_v = ft['sro']
                 if sro_v is None or str(sro_v).strip() not in self._pm_set:
                     continue
@@ -1925,10 +1929,15 @@ class QDRIPDialog(QDialog):
             tmp.setGeometry(g)
             infra_idx.insertFeature(tmp)
 
-        # ── Charger les ZAPA du périmètre PM ─────────────────────────────────
+        # ── Charger les ZAPA du périmètre PM (filtre toujours actif) ─────────
+        # On filtre directement sur _pm_set sans passer par _in_pm/_chk_pm.
+        def _zapa_in_pm(ft):
+            val = ft['sro'] if 'sro' in zapa_fnames else None
+            return val is not None and str(val).strip() in self._pm_set
+
         zapa_feats = [
             ft for ft in zapa_lyr.getFeatures()
-            if self._in_pm(ft, zapa_fnames)
+            if _zapa_in_pm(ft)
             and ft.geometry() is not None
             and not ft.geometry().isEmpty()
         ]
@@ -1936,7 +1945,9 @@ class QDRIPDialog(QDialog):
         if not zapa_feats:
             QMessageBox.information(
                 self, 'Info',
-                'Aucune ZAPA dans le périmètre PM courant.')
+                'Aucune ZAPA trouvée pour les PM de la liste courante.\n'
+                'Vérifiez que le champ "sro" de la couche ZAPA contient bien '
+                'des codes présents dans la liste PM du plugin.')
             return
 
         prog = QProgressDialog(
@@ -2192,12 +2203,11 @@ class QDRIPDialog(QDialog):
                     f'color:#1a6faf; margin-right:4px;">{text}</span>')
 
         # ── Synthèse ──────────────────────────────────────────────────────────
-        pa_kpi = (f'{_kpi(n_pa_sans, "PA sans infra", _c(n_pa_sans))}'
-                  if pa is not None else '')
         synthese = _section('📋', 'Synthèse générale', '#1a6faf',
             f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
             f'{_kpi(n_chev, "Chevauchements", _c(n_chev), f"{total_ov_chev:,.1f} m")}'
             f'{_kpi(n_doub, "Doublons", _c(n_doub), f"{total_ov_doub:,.1f} m")}'
+            f'{_kpi(n_parc, "Parcours listés", "#1a6faf", f"{total_len_parc:,.0f} m total")}'
             f'{_kpi(n_bal, "BAL isolées", _c(n_bal), avg_dist_bal or "—")}'
             f'{_kpi(n_pa_sans, "PA sans infra", _c(n_pa_sans))}'
             f'</tr></table>'
