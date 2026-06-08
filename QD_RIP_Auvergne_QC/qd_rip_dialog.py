@@ -94,6 +94,7 @@ class QDRIPDialog(QDialog):
         super().__init__(parent)
         self._pm_codes = list(DEFAULT_PM_CODES)
         self._pm_set = set(self._pm_codes)
+        self._pa_ignored_empty_zapa = 0
         self.setWindowTitle('QD RIP Auvergne — Contrôle Qualité')
         self.setMinimumSize(980, 700)
         self.resize(1200, 800)
@@ -211,6 +212,51 @@ class QDRIPDialog(QDialog):
             return candidates_p3[0]
         return None
 
+    def _find_pa_bal_layer(self):
+        """Locate the BAL point layer for the PA sans infra tab.
+
+        Priority:
+          1. PostGIS source contains 'table="rad_aw_2026"."bal"'
+          2. Exact name == 'bal'  (point, has fields zapa + sro)
+          3. Name contains 'bal'  (point, has fields zapa + sro)
+        """
+        from qgis.core import QgsWkbTypes
+        candidates_p2 = []
+        candidates_p3 = []
+
+        for lyr in QgsProject.instance().mapLayers().values():
+            if not hasattr(lyr, 'geometryType'):
+                continue
+            try:
+                if lyr.geometryType() != QgsWkbTypes.GeometryType.PointGeometry:
+                    continue
+            except Exception:
+                continue
+
+            # Priority 1 — PostGIS source
+            if self._layer_source_contains_table(lyr, 'table="rad_aw_2026"."bal"'):
+                return lyr
+
+            # Fields zapa + sro required for priorities 2 and 3
+            if not self._has_fields(lyr, 'zapa', 'sro'):
+                continue
+
+            name = lyr.name().strip().lower()
+
+            # Priority 2 — exact name
+            if name == 'bal':
+                candidates_p2.append(lyr)
+
+            # Priority 3 — name contains 'bal'
+            elif 'bal' in name:
+                candidates_p3.append(lyr)
+
+        if candidates_p2:
+            return candidates_p2[0]
+        if candidates_p3:
+            return candidates_p3[0]
+        return None
+
     def _auto_select_layers(self):
         hints = self._LAYER_HINTS
         infra = self._find_layer(*hints['infra'])
@@ -250,6 +296,10 @@ class QDRIPDialog(QDialog):
         pa_infra = self._find_pa_infra_layer()
         if pa_infra:
             self.cb_infra_pa.setLayer(pa_infra)
+
+        pa_bal = self._find_pa_bal_layer()
+        if pa_bal:
+            self.cb_bal_pa.setLayer(pa_bal)
 
     # ─── top-level UI ────────────────────────────────────────────────────────
 
@@ -1851,6 +1901,18 @@ class QDRIPDialog(QDialog):
         )
         frm.addRow('Couche infra :', self.cb_infra_pa)
 
+        self.cb_bal_pa = QgsMapLayerComboBox()
+        self.cb_bal_pa.setFilters(_F_POINT)
+        self.cb_bal_pa.setToolTip(
+            'Couche serveur rad_aw_2026.bal (nom QGIS habituel : bal).\n'
+            'Sert à vérifier qu\'une ZAPA contient au moins une BAL avant\n'
+            'de la considérer comme anomalie sans infra.\n'
+            'Champs requis : zapa, sro.\n'
+            'Détection auto : source PostGIS table="rad_aw_2026"."bal",\n'
+            'puis nom exact "bal" avec champs zapa+sro.'
+        )
+        frm.addRow('Couche BAL :', self.cb_bal_pa)
+
         self.sp_tol_pa = QSpinBox()
         self.sp_tol_pa.setRange(0, 500)
         self.sp_tol_pa.setValue(1)
@@ -1874,8 +1936,10 @@ class QDRIPDialog(QDialog):
 
         info = QLabel(
             '<small><i>Périmètre : liste PM actuelle du plugin.<br>'
-            'Champs requis — ZAPA : <b>id_metier</b>, <b>sro</b>.<br>'
-            'Infra livrable : <b>id_pa</b>.</i></small>'
+            'ZAPA : <b>id_metier</b>, <b>sro</b>.<br>'
+            'Infra : <b>id_pa</b>.<br>'
+            'BAL : <b>zapa</b>, <b>sro</b>.<br>'
+            'Les ZAPA sans BAL sont ignorées.</i></small>'
         )
         info.setWordWrap(True)
         vbox.addWidget(info)
@@ -1902,9 +1966,10 @@ class QDRIPDialog(QDialog):
         sh.addWidget(self.lbl_cnt_pa)
         rv.addLayout(sh)
 
-        self.tbl_pa = QTableWidget(0, 7)
+        self.tbl_pa = QTableWidget(0, 9)
         self.tbl_pa.setHorizontalHeaderLabels([
             'SRO / PM', 'ID ZAPA / PA',
+            'Nb BAL', 'Source BAL',
             'Nb infra attr.', 'Long. attr. (m)',
             'Nb infra spatiale', 'Long. spatiale (m)',
             'Diagnostic',
@@ -1935,6 +2000,7 @@ class QDRIPDialog(QDialog):
     def _run_pa_sans_infra(self):
         zapa_lyr  = self.cb_zapa.currentLayer()
         infra_lyr = self.cb_infra_pa.currentLayer()
+        bal_lyr   = self.cb_bal_pa.currentLayer()
 
         if not zapa_lyr:
             QMessageBox.warning(self, 'Erreur',
@@ -1946,9 +2012,15 @@ class QDRIPDialog(QDialog):
                                 'Sélectionnez la couche infra\n'
                                 '(linéaire avec champ id_pa).')
             return
+        if not bal_lyr:
+            QMessageBox.warning(self, 'Erreur',
+                                'Sélectionnez la couche BAL\n'
+                                '(point avec champs zapa, sro).')
+            return
 
         zapa_fnames  = zapa_lyr.fields().names()
         infra_fnames = infra_lyr.fields().names()
+        bal_fnames   = bal_lyr.fields().names()
 
         missing = []
         if 'id_metier' not in zapa_fnames:
@@ -1957,6 +2029,10 @@ class QDRIPDialog(QDialog):
             missing.append(f'Couche zapa "{zapa_lyr.name()}" : champ "sro" absent')
         if 'id_pa' not in infra_fnames:
             missing.append(f'Couche infra "{infra_lyr.name()}" : champ "id_pa" absent')
+        if 'zapa' not in bal_fnames:
+            missing.append(f'Couche BAL "{bal_lyr.name()}" : champ "zapa" absent')
+        if 'sro' not in bal_fnames:
+            missing.append(f'Couche BAL "{bal_lyr.name()}" : champ "sro" absent')
         if missing:
             QMessageBox.warning(self, 'Champs requis manquants',
                                 '\n'.join(missing))
@@ -2039,6 +2115,49 @@ class QDRIPDialog(QDialog):
             tmp.setGeometry(g)
             infra_idx.insertFeature(tmp)
 
+        # ── Charger les BAL du périmètre PM (comptage attributaire + index spatial) ─
+        self.lbl_status.setText('Chargement des BAL…')
+        QApplication.processEvents()
+
+        # CRS BAL → CRS ZAPA si nécessaire pour le fallback spatial
+        need_bal_transform = (zapa_lyr.crs().authid() != bal_lyr.crs().authid())
+        xform_bal = None
+        if need_bal_transform:
+            xform_bal = QgsCoordinateTransform(
+                bal_lyr.crs(), zapa_lyr.crs(),
+                QgsProject.instance().transformContext())
+
+        # bal_count_by_zapa : id_metier (str) → nb BAL rattachées attributairement
+        bal_count_by_zapa = {}
+        bal_idx   = QgsSpatialIndex()
+        bal_geoms = {}   # fid → QgsGeometry (dans le CRS ZAPA)
+
+        for ft in bal_lyr.getFeatures():
+            g = ft.geometry()
+            if g is None or g.isEmpty():
+                continue
+            # Filtre PM sur le SRO de la BAL
+            sro_v = ft['sro']
+            if sro_v is None or str(sro_v).strip() not in self._pm_set:
+                continue
+            # Comptage attributaire : bal.zapa → zapa.id_metier
+            zapa_ref = ft['zapa']
+            if zapa_ref is not None:
+                key = str(zapa_ref).strip()
+                if key:
+                    bal_count_by_zapa[key] = bal_count_by_zapa.get(key, 0) + 1
+            # Index spatial pour fallback
+            if need_bal_transform:
+                from qgis.core import QgsGeometry as _QgsGeometry
+                g = _QgsGeometry(g)
+                g.transform(xform_bal)
+            fid = ft.id()
+            bal_geoms[fid] = g
+            tmp = QgsFeature()
+            tmp.setId(fid)
+            tmp.setGeometry(g)
+            bal_idx.insertFeature(tmp)
+
         # ── Charger les ZAPA du périmètre PM (filtre toujours actif) ─────────
         # On filtre directement sur _pm_set sans passer par _in_pm/_chk_pm.
         def _zapa_in_pm(ft):
@@ -2067,6 +2186,7 @@ class QDRIPDialog(QDialog):
         prog.setWindowModality(Qt.WindowModality.WindowModal)
 
         results = []
+        ignored_empty_zapa = 0
 
         for i, zapa_ft in enumerate(zapa_feats):
             prog.setValue(i)
@@ -2084,7 +2204,29 @@ class QDRIPDialog(QDialog):
             zapa_sro  = (str(zapa_ft['sro']).strip()
                          if zapa_ft['sro'] is not None else '')
 
-            # ── Contrôle attributaire ─────────────────────────────────────────
+            # ── Garde-fou BAL : ignorer les ZAPA sans BAL ────────────────────
+            # Priorité 1 — attributaire : bal.zapa == zapa.id_metier
+            nb_bal_attr = bal_count_by_zapa.get(id_metier, 0) if id_metier else 0
+
+            # Priorité 2 — fallback spatial si 0 BAL attributaire
+            if nb_bal_attr == 0:
+                bbox_zapa = zapa_g.boundingBox()
+                nb_bal_spatial = 0
+                for bfid in bal_idx.intersects(bbox_zapa):
+                    if zapa_g.contains(bal_geoms[bfid]):
+                        nb_bal_spatial += 1
+                nb_bal = nb_bal_spatial
+                bal_source = 'Spatial' if nb_bal > 0 else '—'
+            else:
+                nb_bal = nb_bal_attr
+                bal_source = 'Attributaire'
+
+            if nb_bal == 0:
+                # Pas de BAL dans cette ZAPA : absence d'infra est normale, ignorer
+                ignored_empty_zapa += 1
+                continue
+
+            # ── Contrôle attributaire infra ───────────────────────────────────
             attr_count = 0
             attr_long  = 0.0
             if id_metier:
@@ -2096,7 +2238,7 @@ class QDRIPDialog(QDialog):
                     attr_count += 1
                     attr_long  += l
 
-            # ── Contrôle spatial ──────────────────────────────────────────────
+            # ── Contrôle spatial infra ────────────────────────────────────────
             spatial_count = 0
             spatial_long  = 0.0
             search_g = zapa_g.buffer(tol, 5) if tol > 0 else zapa_g
@@ -2123,6 +2265,8 @@ class QDRIPDialog(QDialog):
             results.append(dict(
                 sro           = zapa_sro,
                 id_zapa       = id_metier,
+                nb_bal        = nb_bal,
+                bal_source    = bal_source,
                 attr_count    = attr_count,
                 attr_long     = attr_long,
                 spatial_count = spatial_count,
@@ -2133,6 +2277,7 @@ class QDRIPDialog(QDialog):
             ))
 
         prog.setValue(len(zapa_feats))
+        self._pa_ignored_empty_zapa = ignored_empty_zapa
 
         # ── Remplir le tableau ────────────────────────────────────────────────
         self.tbl_pa.setSortingEnabled(False)
@@ -2144,6 +2289,8 @@ class QDRIPDialog(QDialog):
             cells = [
                 _si(r['sro']),
                 _si(r['id_zapa']),
+                _ni(r['nb_bal']),
+                _si(r['bal_source']),
                 _ni(r['attr_count']),
                 _ni(f"{r['attr_long']:.1f}"),
                 _ni(r['spatial_count']),
@@ -2161,13 +2308,16 @@ class QDRIPDialog(QDialog):
 
         n_sans  = sum(1 for r in results if r['diagnostic'] == 'SANS INFRA')
         n_disc  = len(results) - n_sans
-        n_total = len(zapa_feats)
-        cnt_txt = f'{n_sans} ZAPA sans infra / {n_total} analysées'
+        n_total = len(zapa_feats) - ignored_empty_zapa
+        cnt_txt = f'{n_sans} ZAPA sans infra / {n_total} ZAPA avec BAL analysées'
         if incl_discord and n_disc:
             cnt_txt += f' + {n_disc} discordance(s)'
+        if ignored_empty_zapa:
+            cnt_txt += f' — {ignored_empty_zapa} ZAPA sans BAL ignorées'
         self.lbl_cnt_pa.setText(cnt_txt)
         self.lbl_status.setText(
-            f'PA sans infra : {n_sans} ZAPA sans infra sur {n_total} analysées.')
+            f'PA sans infra : {n_sans} ZAPA sans infra sur {n_total} ZAPA avec BAL analysées.'
+            + (f' {ignored_empty_zapa} ZAPA sans BAL ignorées.' if ignored_empty_zapa else ''))
         self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -2216,12 +2366,13 @@ class QDRIPDialog(QDialog):
                 if hasattr(self, 'tbl_pa') else [])
         charts = self._make_charts(chev, doub, parc, bal)
         self.tb_rapport.setHtml(
-            self._build_tab_html(chev, doub, parc, bal, charts, pa=pa))
+            self._build_tab_html(chev, doub, parc, bal, charts, pa=pa,
+                                 pa_ignored=self._pa_ignored_empty_zapa))
         now = datetime.datetime.now().strftime('%H:%M:%S')
         self.lbl_rapport_time.setText(f'Dernière actualisation : {now}')
         self.lbl_rapport_time.setStyleSheet('font-size: 11px;')
 
-    def _build_tab_html(self, chev, doub, parc, bal, charts, pa=None):
+    def _build_tab_html(self, chev, doub, parc, bal, charts, pa=None, pa_ignored=0):
         """Build QTextBrowser-compatible HTML for the in-app dashboard."""
         if pa is None:
             pa = []
@@ -2376,7 +2527,8 @@ class QDRIPDialog(QDialog):
             f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
             f'{_kpi(n_pa_sans, "ZAPA sans infra", _c(n_pa_sans))}'
             f'{_kpi(n_disc_pa, "Discordances", _c(n_disc_pa) if n_disc_pa else "#888888")}'
-            f'<td></td><td></td>'
+            f'{_kpi(pa_ignored, "ZAPA sans BAL ignorées", "#888888")}'
+            f'<td></td>'
             f'</tr></table>'
         )
         pa_section = _section('🚫', 'PA sans infra', '#8e44ad', pa_body)
@@ -2404,7 +2556,7 @@ class QDRIPDialog(QDialog):
             + pa_section
 
             + '<p style="font-size:10px; color:#aaaaaa; text-align:center; margin-top:8px;">'
-            'Plugin QD RIP Auvergne v1.1.5 — Pleymove</p>'
+            'Plugin QD RIP Auvergne v1.1.7 — Pleymove</p>'
             '</body></html>'
         )
 

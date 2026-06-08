@@ -29,6 +29,14 @@ Plugin de contrôle qualité des données RIP Auvergne.
 
 ## Changelog
 
+### Version 1.1.7
+- Correction de l'onglet **PA sans infra** : exclusion des ZAPA sans BAL
+- Ajout de la couche BAL dans la configuration de l'onglet (auto-détection PostGIS `rad_aw_2026.bal`)
+- Comptage BAL par ZAPA : priorité attributaire (`bal.zapa = zapa.id_metier`), fallback spatial
+- Les ZAPA avec 0 BAL sont ignorées (absence d'infra est normale)
+- Colonne **Nb BAL** et **Source BAL** ajoutées dans le tableau et les exports
+- Compteur indiquant le nombre de ZAPA sans BAL ignorées (tableau de bord inclus)
+
 ### Version 1.1.6
 - Correction de l'auto-sélection des couches dans l'onglet **PA sans infra**
 - Nouvelle détection prioritaire : source PostGIS (`table="rad_aw_2026"."zapa"/"infra"`), puis nom exact (`zapa`/`infra` avec validation des champs), puis nom contenant `livrable_zapa`/`livrable_infra`
