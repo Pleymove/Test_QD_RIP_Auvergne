@@ -30,6 +30,13 @@ Plugin de contrôle qualité des données RIP Auvergne.
 
 ## Changelog
 
+### Version 1.3.0
+- Refonte de l'onglet **📊 Tableau de bord**, désormais **autonome** (ne nécessite plus de lancer les autres analyses)
+- **Section Dashboard** : chiffres clés du périmètre (nb PA, nb PM, nb adresses, total cheminement) + répartition du cheminement par catégorie d'infra (étiquettes `mode_pose` via `MODE_POSE_LABELS`)
+- **Section Détail** : une ligne **par PA** (NRO, PM, PA, Nb adresses, cheminement par catégorie, Total cheminement), triable sur toutes les colonnes et filtrable par texte
+- Données calculées directement depuis les couches `pa`, `bal` et `infra`
+- Rattachement infra → PA : attributaire si le champ code PA existe, sinon spatial (intersection géométrique proportionnelle)
+
 ### Version 1.2.1
 - Correction de l'extraction **BAL** : les colonnes `nb_prises`, `pa`, `pmz` n'étaient pas remplies à cause du tri actif pendant le remplissage du tableau
 - Le tri est désormais désactivé pendant le remplissage puis réactivé (même logique que l'extraction EPA)

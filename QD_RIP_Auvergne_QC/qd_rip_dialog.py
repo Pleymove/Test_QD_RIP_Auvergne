@@ -74,6 +74,20 @@ def _si(text):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Libellés des catégories de cheminement (mode_pose)
+# ─────────────────────────────────────────────────────────────────────────────
+MODE_POSE_LABELS = {
+    "C0": "C0 : A CREER Aérien Télécom",
+    "E0": "E0 : EXISTANT Aérien Télécom",
+    "E1": "E1 : EXISTANT Aérien Energie",
+    "E2": "E2 : Façade existante",
+    "E3": "E3 : Immeuble existant",
+    "E7": "E7 : Conduite existante ORANGE",
+    "C7": "C7 : Conduite transport",
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main dialog
 # ─────────────────────────────────────────────────────────────────────────────
 class QDRIPDialog(QDialog):
@@ -2927,45 +2941,437 @@ class QDRIPDialog(QDialog):
 
         bar = QHBoxLayout()
         self.lbl_rapport_time = QLabel(
-            'Lancez une analyse pour actualiser automatiquement ce tableau de bord.'
+            'Cliquez sur <b>Actualiser</b> pour calculer le tableau de bord depuis les couches QGIS.'
         )
-        self.lbl_rapport_time.setStyleSheet('color: gray; font-style: italic; font-size: 11px;')
+        self.lbl_rapport_time.setStyleSheet('color: gray; font-size: 11px;')
+        self.lbl_rapport_time.setTextFormat(Qt.TextFormat.RichText)
         bar.addWidget(self.lbl_rapport_time, 1)
         btn_refresh = QPushButton('🔄  Actualiser')
-        btn_refresh.setToolTip('Recalcule le tableau de bord avec les résultats actuels.')
+        btn_refresh.setToolTip('Recalcule le tableau de bord directement depuis les couches QGIS.')
         btn_refresh.clicked.connect(self._refresh_rapport_tab)
         bar.addWidget(btn_refresh)
         v.addLayout(bar)
 
-        self.tb_rapport = QTextBrowser()
-        self.tb_rapport.setOpenExternalLinks(False)
-        self.tb_rapport.setHtml(
-            '<html><body style="font-family:Arial,sans-serif; color:#888888; padding:24px;">'
-            '<p style="font-size:13px;">Aucune analyse disponible.<br/>'
-            'Lancez les analyses dans les onglets précédents, le tableau de bord '
-            's\'actualisera automatiquement.</p></body></html>'
-        )
-        v.addWidget(self.tb_rapport)
+        splitter = QSplitter(Qt.Orientation.Vertical)
 
+        # ── Section 1 : Dashboard ────────────────────────────────────────────
+        grp_dash = QGroupBox('📋  Dashboard — Chiffres clés du périmètre')
+        dash_v = QVBoxLayout(grp_dash)
+        dash_v.setContentsMargins(8, 8, 8, 8)
+        self.lbl_dash_content = QLabel(
+            '<i style="color:#888;">Aucune donnée. Cliquez sur Actualiser.</i>'
+        )
+        self.lbl_dash_content.setWordWrap(True)
+        self.lbl_dash_content.setTextFormat(Qt.TextFormat.RichText)
+        self.lbl_dash_content.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.lbl_dash_content.setStyleSheet('padding: 4px; font-size: 12px;')
+        dash_v.addWidget(self.lbl_dash_content)
+        splitter.addWidget(grp_dash)
+
+        # ── Section 2 : Détail par PA ────────────────────────────────────────
+        grp_detail = QGroupBox('🗂  Détail par PA')
+        det_v = QVBoxLayout(grp_detail)
+        det_v.setContentsMargins(6, 6, 6, 6)
+
+        srch_h = QHBoxLayout()
+        self.le_srch_rapport = QLineEdit()
+        self.le_srch_rapport.setPlaceholderText('Filtrer par NRO, PM, PA…')
+        self.le_srch_rapport.setClearButtonEnabled(True)
+        self.le_srch_rapport.textChanged.connect(self._on_rapport_filter)
+        srch_h.addWidget(self.le_srch_rapport, 1)
+        self.lbl_cnt_rapport = QLabel('—')
+        self.lbl_cnt_rapport.setStyleSheet('font-size:11px; color:#555;')
+        srch_h.addWidget(self.lbl_cnt_rapport)
+        det_v.addLayout(srch_h)
+
+        self.tbl_rapport = QTableWidget(0, 4)
+        self.tbl_rapport.setHorizontalHeaderLabels(
+            ['NRO', 'PM', 'PA', 'Nb adresses'])
+        self._style_table(self.tbl_rapport)
+        det_v.addWidget(self.tbl_rapport)
+        splitter.addWidget(grp_detail)
+
+        splitter.setSizes([160, 440])
+        v.addWidget(splitter, 1)
         return root
 
-    def _refresh_rapport_tab(self):
-        """Rebuild the in-app dashboard with the latest results from all analysis tabs."""
-        if not hasattr(self, 'tb_rapport'):
+    def _on_rapport_filter(self, text):
+        if not hasattr(self, 'tbl_rapport'):
             return
-        chev = self._collect_table_data(self.tbl_chev)
-        doub = self._collect_table_data(self.tbl_doub)
-        parc = self._collect_table_data(self.tbl_parc)
-        bal  = self._collect_table_data(self.tbl_bal)
-        pa   = (self._collect_table_data(self.tbl_pa)
-                if hasattr(self, 'tbl_pa') else [])
-        charts = self._make_charts(chev, doub, parc, bal)
-        self.tb_rapport.setHtml(
-            self._build_tab_html(chev, doub, parc, bal, charts, pa=pa,
-                                 pa_ignored=self._pa_ignored_empty_zapa))
+        self._filter_table(self.tbl_rapport, text)
+        self._update_rapport_count()
+
+    def _update_rapport_count(self):
+        if not hasattr(self, 'tbl_rapport'):
+            return
+        visible = sum(
+            1 for r in range(self.tbl_rapport.rowCount())
+            if not self.tbl_rapport.isRowHidden(r)
+        )
+        self.lbl_cnt_rapport.setText(f'{visible} PA affichés')
+
+    def _refresh_rapport_tab(self):
+        """Recalcule le tableau de bord directement depuis les couches QGIS (autonome)."""
+        if not hasattr(self, 'tbl_rapport'):
+            return
+        self.lbl_status.setText('Calcul tableau de bord…')
+        QApplication.processEvents()
+        try:
+            result = self._compute_dashboard_data()
+        except Exception as e:
+            self.lbl_dash_content.setText(
+                f'<span style="color:#c0392b;">Erreur : {e}</span>')
+            self.lbl_status.setText('Erreur tableau de bord.')
+            return
+        if result is None:
+            self.lbl_status.setText('Prêt.')
+            return
+
+        pa_rows, kpis, mode_order = result
+
+        # ── Dashboard HTML ────────────────────────────────────────────────────
+        nb_pa      = kpis['nb_pa']
+        nb_pm      = kpis['nb_pm']
+        nb_adr     = kpis['nb_adresses']
+        tot_ch     = kpis['total_cheminement']
+        per_mode   = kpis['per_mode']
+        layer_info = kpis.get('layer_info', '')
+
+        def _kpi_html(val, label):
+            return (
+                f'<td style="padding:0 18px 0 0; text-align:center; vertical-align:top;">'
+                f'<span style="font-size:22px; font-weight:bold; color:#1a6faf;">{val}</span>'
+                f'<br/><span style="font-size:10px; color:#888;">{label}</span>'
+                f'</td>'
+            )
+
+        def _fmt(n):
+            return f'{n:,.0f}'.replace(',', ' ')
+
+        kpi_row = (
+            '<table style="margin-bottom:8px;" cellspacing="0" cellpadding="2"><tr>'
+            + _kpi_html(nb_pa, 'PA')
+            + _kpi_html(nb_pm, 'PM (PMZ)')
+            + _kpi_html(_fmt(nb_adr), 'Adresses')
+            + _kpi_html(_fmt(tot_ch) + ' m', 'Total cheminement')
+            + '</tr></table>'
+        )
+
+        if mode_order:
+            parts = []
+            for m in mode_order:
+                lbl = MODE_POSE_LABELS.get(m, m)
+                v   = per_mode.get(m, 0.0)
+                parts.append(f'<b>{lbl}</b>&nbsp;:&nbsp;{_fmt(v)}&nbsp;m')
+            repartition_html = (
+                '<p style="margin:4px 0 0 0; font-size:11px; color:#333;">'
+                '<b>Répartition cheminement :</b><br/>&nbsp;&nbsp;·&nbsp;&nbsp;'
+                + '&nbsp;&nbsp;·&nbsp;&nbsp;'.join(parts)
+                + '</p>'
+            )
+        else:
+            repartition_html = (
+                '<p style="margin:4px 0 0 0; font-size:11px; color:#888;">'
+                'Aucun cheminement trouvé.</p>'
+            )
+
+        layer_html = (
+            f'<p style="margin:6px 0 0 0; font-size:10px; color:#aaa;">{layer_info}</p>'
+            if layer_info else ''
+        )
+
+        self.lbl_dash_content.setText(kpi_row + repartition_html + layer_html)
+
+        # ── Tableau détail ────────────────────────────────────────────────────
+        fixed_cols = ['NRO', 'PM', 'PA', 'Nb adresses']
+        mode_cols  = [MODE_POSE_LABELS.get(m, m) for m in mode_order]
+        all_cols   = fixed_cols + mode_cols + ['Total cheminement']
+
+        self.tbl_rapport.setSortingEnabled(False)
+        self.tbl_rapport.setRowCount(0)
+        self.tbl_rapport.setColumnCount(len(all_cols))
+        self.tbl_rapport.setHorizontalHeaderLabels(all_cols)
+
+        for row_data in pa_rows:
+            row = self.tbl_rapport.rowCount()
+            self.tbl_rapport.insertRow(row)
+            self.tbl_rapport.setItem(row, 0, _si(row_data['nro']))
+            self.tbl_rapport.setItem(row, 1, _si(row_data['pm']))
+            self.tbl_rapport.setItem(row, 2, _si(row_data['pa']))
+            it_adr = _ni(str(int(round(row_data['nb_adresses']))))
+            it_adr.setData(Qt.ItemDataRole.UserRole, row_data['nb_adresses'])
+            self.tbl_rapport.setItem(row, 3, it_adr)
+            for i, m in enumerate(mode_order):
+                v = row_data['modes'].get(m, 0.0)
+                it = _ni(f'{v:.1f}')
+                it.setData(Qt.ItemDataRole.UserRole, v)
+                self.tbl_rapport.setItem(row, 4 + i, it)
+            tot = row_data['total_cheminement']
+            it_tot = _ni(f'{tot:.1f}')
+            it_tot.setData(Qt.ItemDataRole.UserRole, tot)
+            self.tbl_rapport.setItem(row, 4 + len(mode_order), it_tot)
+
+        self.tbl_rapport.setSortingEnabled(True)
+
+        if self.le_srch_rapport.text():
+            self._filter_table(self.tbl_rapport, self.le_srch_rapport.text())
+        self._update_rapport_count()
+
         now = datetime.datetime.now().strftime('%H:%M:%S')
         self.lbl_rapport_time.setText(f'Dernière actualisation : {now}')
         self.lbl_rapport_time.setStyleSheet('font-size: 11px;')
+        self.lbl_status.setText(
+            f'Tableau de bord : {nb_pa} PA, {nb_pm} PM, '
+            f'{int(round(nb_adr))} adresses, {tot_ch:.0f} m cheminement.')
+
+    def _compute_dashboard_data(self):
+        """Calcule les données du tableau de bord depuis les couches QGIS."""
+        pa_lyr    = self._find_pa_zapa_layer()
+        bal_lyr   = self._find_pa_bal_layer()
+        infra_lyr = self._find_pa_infra_layer()
+
+        missing = []
+        if pa_lyr is None:
+            missing.append('couche PA/ZAPA (polygones, table rad_aw_2026.zapa)')
+        if bal_lyr is None:
+            missing.append('couche BAL (points)')
+        if infra_lyr is None:
+            missing.append('couche Infra (lignes)')
+        if missing:
+            self.lbl_dash_content.setText(
+                '<span style="color:#c0392b;"><b>Couche(s) manquante(s) :</b><br/>· '
+                + '<br/>· '.join(missing)
+                + '</span>')
+            return None
+
+        def _pick(lyr, candidates):
+            fl = [f.lower() for f in lyr.fields().names()]
+            fo = lyr.fields().names()
+            for c in candidates:
+                if c.lower() in fl:
+                    return fo[fl.index(c.lower())]
+            return None
+
+        # Champs PA
+        pa_code_fld = _pick(pa_lyr,  ['id_pa', 'code_pa', 'pa', 'id_zapa', 'zapa', 'id_metier'])
+        nro_fld     = _pick(pa_lyr,  ['nro', 'id_nro', 'code_nro', 'nom_nro'])
+        # Champs BAL
+        bal_pa_fld  = _pick(bal_lyr, ['zapa', 'id_zapa', 'pa', 'id_pa'])
+        bal_pm_fld  = _pick(bal_lyr, ['sro', 'id_ftth_pf', 'pmz', 'pm', 'nom_pm'])
+        bal_pri_fld = _pick(bal_lyr, ['prises', 'nb_prises', 'nb_adresses', 'adresses', 'nb_pe'])
+        # Champs Infra
+        mode_fld    = _pick(infra_lyr, ['mode_pose', 'mode_de_pose', 'modepose',
+                                        'type_pose', 'type_infra', 'categorie', 'type', 'mode'])
+        lng_fld     = _pick(infra_lyr, ['longueur', 'long', 'ml', 'metres', 'length', 'lg'])
+        inf_pa_fld  = _pick(infra_lyr, ['zapa', 'id_zapa', 'pa', 'id_pa'])
+
+        if pa_code_fld is None:
+            self.lbl_dash_content.setText(
+                '<span style="color:#c0392b;">Champ code PA introuvable dans la couche PA. '
+                'Champs attendus : id_pa, code_pa, pa, id_zapa, zapa, id_metier.</span>')
+            return None
+        if bal_pm_fld is None:
+            self.lbl_dash_content.setText(
+                '<span style="color:#c0392b;">Champ PM introuvable dans la couche BAL. '
+                'Champs attendus : sro, id_ftth_pf, pmz, pm, nom_pm.</span>')
+            return None
+
+        # ── Étape 1 : charger les PA ─────────────────────────────────────────
+        pa_dict = {}   # pa_code → {'nro': str, 'geom': QgsGeometry}
+        for feat in pa_lyr.getFeatures():
+            code = feat[pa_code_fld]
+            if code is None:
+                continue
+            code = str(code).strip()
+            if not code:
+                continue
+            nro = str(feat[nro_fld]).strip() if nro_fld and feat[nro_fld] is not None else ''
+            pa_dict[code] = {'nro': nro, 'geom': feat.geometry()}
+
+        if not pa_dict:
+            self.lbl_dash_content.setText(
+                '<span style="color:#888;">Aucun PA trouvé dans la couche PA.</span>')
+            return None
+
+        # ── Étape 2 : BAL → PM majoritaire + prises par PA ──────────────────
+        bal_pm_counter = {}   # pa_code → Counter({pm: count})
+        bal_prises     = {}   # pa_code → float
+
+        for feat in bal_lyr.getFeatures():
+            pa_code = feat[bal_pa_fld] if bal_pa_fld else None
+            if pa_code is None:
+                continue
+            pa_code = str(pa_code).strip()
+            if pa_code not in pa_dict:
+                continue
+            pm_val = feat[bal_pm_fld]
+            if pm_val is None:
+                continue
+            pm_val = str(pm_val).strip()
+            prises = 0.0
+            if bal_pri_fld:
+                try:
+                    v = feat[bal_pri_fld]
+                    if v is not None:
+                        prises = float(v)
+                except (TypeError, ValueError):
+                    pass
+            if pa_code not in bal_pm_counter:
+                bal_pm_counter[pa_code] = Counter()
+            bal_pm_counter[pa_code][pm_val] += 1
+            bal_prises[pa_code] = bal_prises.get(pa_code, 0.0) + prises
+
+        pa_pm = {
+            pa_code: counter.most_common(1)[0][0]
+            for pa_code, counter in bal_pm_counter.items()
+        }
+
+        # ── Étape 3 : filtre PM ──────────────────────────────────────────────
+        if self.chk_pm.isChecked() and self._pm_set:
+            pm_lower = {str(p).lower() for p in self._pm_set}
+            valid_pa = {
+                c for c in pa_dict
+                if pa_pm.get(c, '').lower() in pm_lower
+            }
+        else:
+            valid_pa = set(pa_dict.keys())
+
+        if not valid_pa:
+            self.lbl_dash_content.setText(
+                '<span style="color:#888;">Aucun PA dans le périmètre PM courant.</span>')
+            return [], {'nb_pa': 0, 'nb_pm': 0, 'nb_adresses': 0.0,
+                        'total_cheminement': 0.0, 'per_mode': {}, 'layer_info': ''}, []
+
+        # ── Étape 4 : Infra → PA (attributaire ou spatial) ──────────────────
+        infra_by_pa = {}   # pa_code → {mode: float}
+
+        if inf_pa_fld:
+            # Regroupement attributaire
+            for feat in infra_lyr.getFeatures():
+                pa_code = feat[inf_pa_fld]
+                if pa_code is None:
+                    continue
+                pa_code = str(pa_code).strip()
+                if pa_code not in valid_pa:
+                    continue
+                mode = ''
+                if mode_fld:
+                    v = feat[mode_fld]
+                    mode = str(v).strip() if v is not None else ''
+                lng = 0.0
+                if lng_fld:
+                    try:
+                        v = feat[lng_fld]
+                        if v is not None:
+                            lng = float(v)
+                    except (TypeError, ValueError):
+                        pass
+                if lng == 0.0:
+                    try:
+                        g = feat.geometry()
+                        if g:
+                            lng = g.length()
+                    except Exception:
+                        pass
+                d = infra_by_pa.setdefault(pa_code, {})
+                d[mode] = d.get(mode, 0.0) + lng
+        else:
+            # Regroupement spatial : index sur les polygones PA
+            valid_geoms = {c: pa_dict[c]['geom'] for c in valid_pa if pa_dict[c]['geom']}
+            if valid_geoms:
+                pa_index = QgsSpatialIndex()
+                fid_to_code = {}
+                for tmp_fid, (pa_code, geom) in enumerate(valid_geoms.items()):
+                    f = QgsFeature()
+                    f.setId(tmp_fid)
+                    f.setGeometry(geom)
+                    pa_index.addFeature(f)
+                    fid_to_code[tmp_fid] = pa_code
+
+                for feat in infra_lyr.getFeatures():
+                    geom = feat.geometry()
+                    if not geom or geom.isEmpty():
+                        continue
+                    mode = ''
+                    if mode_fld:
+                        v = feat[mode_fld]
+                        mode = str(v).strip() if v is not None else ''
+                    candidates = pa_index.intersects(geom.boundingBox())
+                    if not candidates:
+                        continue
+                    isect_per_pa = {}
+                    total_isect  = 0.0
+                    for fid in candidates:
+                        pa_code = fid_to_code[fid]
+                        try:
+                            isect = geom.intersection(valid_geoms[pa_code])
+                            if isect and not isect.isEmpty():
+                                il = isect.length()
+                                if il > 0:
+                                    isect_per_pa[pa_code] = il
+                                    total_isect += il
+                        except Exception:
+                            pass
+                    if not isect_per_pa:
+                        continue
+                    if lng_fld:
+                        try:
+                            v = feat[lng_fld]
+                            total_len = float(v) if v is not None else geom.length()
+                        except (TypeError, ValueError):
+                            total_len = geom.length()
+                    else:
+                        total_len = geom.length()
+                    for pa_code, il in isect_per_pa.items():
+                        ratio = il / total_isect if total_isect > 0 else 1.0
+                        lng = total_len * ratio
+                        d = infra_by_pa.setdefault(pa_code, {})
+                        d[mode] = d.get(mode, 0.0) + lng
+
+        # ── Étape 5 : ordre des modes ────────────────────────────────────────
+        all_modes = set()
+        for modes in infra_by_pa.values():
+            all_modes.update(modes.keys())
+        known_order   = [k for k in MODE_POSE_LABELS if k in all_modes]
+        unknown_order = sorted(all_modes - set(known_order))
+        mode_order    = known_order + unknown_order
+
+        # ── Étape 6 : lignes par PA ──────────────────────────────────────────
+        pa_rows = []
+        for pa_code in sorted(valid_pa):
+            if pa_code not in pa_dict:
+                continue
+            modes  = infra_by_pa.get(pa_code, {})
+            tot_ch = sum(modes.values())
+            pa_rows.append({
+                'nro':               pa_dict[pa_code]['nro'],
+                'pm':                pa_pm.get(pa_code, ''),
+                'pa':                pa_code,
+                'nb_adresses':       bal_prises.get(pa_code, 0.0),
+                'modes':             modes,
+                'total_cheminement': tot_ch,
+            })
+
+        # ── Étape 7 : KPIs ───────────────────────────────────────────────────
+        nb_pa_k    = len(pa_rows)
+        nb_pm_k    = len({r['pm'] for r in pa_rows if r['pm']})
+        nb_adr_k   = sum(r['nb_adresses'] for r in pa_rows)
+        tot_all    = sum(r['total_cheminement'] for r in pa_rows)
+        per_mode_k = {m: sum(r['modes'].get(m, 0.0) for r in pa_rows) for m in mode_order}
+        layer_info = (
+            f'Couches utilisées : {pa_lyr.name()} / {bal_lyr.name()} / {infra_lyr.name()}'
+        )
+
+        kpis = {
+            'nb_pa':             nb_pa_k,
+            'nb_pm':             nb_pm_k,
+            'nb_adresses':       nb_adr_k,
+            'total_cheminement': tot_all,
+            'per_mode':          per_mode_k,
+            'layer_info':        layer_info,
+        }
+        return pa_rows, kpis, mode_order
 
     def _build_tab_html(self, chev, doub, parc, bal, charts, pa=None, pa_ignored=0):
         """Build QTextBrowser-compatible HTML for the in-app dashboard."""
