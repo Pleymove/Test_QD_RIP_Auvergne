@@ -25,9 +25,19 @@ Plugin de contrôle qualité des données RIP Auvergne.
 | Parcours les plus longs | Classement par longueur décroissante (Top N configurable) |
 | BAL éloignées infra | Contrôle de la distance BAL→infra par PM. Mode isolation (rayon 500 m par défaut) ou analyse globale. Filtre distance infra configurable (défaut 1000 m) |
 | PA sans infra | ZAPA du périmètre PM courant sans infra dans le groupement livrables (double contrôle attributaire id_pa + spatial) |
+| Extractions | Extraction EPA/PA filtrée sur le périmètre PM courant, export CSV/Excel/SHP |
 | Tableau de bord | Synthèse des résultats des autres onglets avec indicateurs clés |
 
 ## Changelog
+
+### Version 1.1.9
+- Ajout d'un nouvel onglet **📤 Extractions**
+- Première extraction : **EPA / PA du périmètre PM courant**, filtré sur `self._pm_set`
+- Colonnes exportées : `id_epa` (id_metier → id_ftth → gid → fid), `pmz` (sro → id_ftth_pf → pmz → pm → nom_pm)
+- Auto-détection robuste de la couche EPA/PA (jamais ZAPA)
+- Export **CSV** (`id_epa;pmz`, UTF-8-sig, séparateur `;`)
+- Export **Excel** et **SHP** disponibles
+- Zoom / Sélectionner dans QGIS sur les lignes du tableau
 
 ### Version 1.1.8
 - Renommage de l'onglet **BAL isolées** en **BAL éloignées infra**
