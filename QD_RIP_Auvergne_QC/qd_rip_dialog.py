@@ -2952,11 +2952,11 @@ class QDRIPDialog(QDialog):
         bar.addWidget(btn_refresh)
         v.addLayout(bar)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
+        inner_tabs = QTabWidget()
 
-        # ── Section 1 : Dashboard ────────────────────────────────────────────
-        grp_dash = QGroupBox('📋  Dashboard — Chiffres clés du périmètre')
-        dash_v = QVBoxLayout(grp_dash)
+        # ── Sous-onglet 1 : Dashboard ─────────────────────────────────────────
+        dash_w = QWidget()
+        dash_v = QVBoxLayout(dash_w)
         dash_v.setContentsMargins(8, 8, 8, 8)
         self.lbl_dash_content = QLabel(
             '<i style="color:#888;">Aucune donnée. Cliquez sur Actualiser.</i>'
@@ -2967,11 +2967,12 @@ class QDRIPDialog(QDialog):
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.lbl_dash_content.setStyleSheet('padding: 4px; font-size: 12px;')
         dash_v.addWidget(self.lbl_dash_content)
-        splitter.addWidget(grp_dash)
+        dash_v.addStretch()
+        inner_tabs.addTab(dash_w, '📋  Dashboard')
 
-        # ── Section 2 : Détail par PA ────────────────────────────────────────
-        grp_detail = QGroupBox('🗂  Détail par PA')
-        det_v = QVBoxLayout(grp_detail)
+        # ── Sous-onglet 2 : Détail par PA ─────────────────────────────────────
+        det_w = QWidget()
+        det_v = QVBoxLayout(det_w)
         det_v.setContentsMargins(6, 6, 6, 6)
 
         srch_h = QHBoxLayout()
@@ -2990,10 +2991,9 @@ class QDRIPDialog(QDialog):
             ['NRO', 'PM', 'PA', 'Nb adresses'])
         self._style_table(self.tbl_rapport)
         det_v.addWidget(self.tbl_rapport)
-        splitter.addWidget(grp_detail)
+        inner_tabs.addTab(det_w, '🗂  Détail par PA')
 
-        splitter.setSizes([160, 440])
-        v.addWidget(splitter, 1)
+        v.addWidget(inner_tabs, 1)
         return root
 
     def _on_rapport_filter(self, text):
@@ -3049,6 +3049,11 @@ class QDRIPDialog(QDialog):
         def _fmt(n):
             return f'{n:,.0f}'.replace(',', ' ')
 
+        def _mode_lbl(code):
+            if not code:
+                return 'Non renseigné'
+            return MODE_POSE_LABELS.get(code, code)
+
         kpi_row = (
             '<table style="margin-bottom:8px;" cellspacing="0" cellpadding="2"><tr>'
             + _kpi_html(nb_pa, 'PA')
@@ -3061,7 +3066,7 @@ class QDRIPDialog(QDialog):
         if mode_order:
             parts = []
             for m in mode_order:
-                lbl = MODE_POSE_LABELS.get(m, m)
+                lbl = _mode_lbl(m)
                 v   = per_mode.get(m, 0.0)
                 parts.append(f'<b>{lbl}</b>&nbsp;:&nbsp;{_fmt(v)}&nbsp;m')
             repartition_html = (
@@ -3085,7 +3090,7 @@ class QDRIPDialog(QDialog):
 
         # ── Tableau détail ────────────────────────────────────────────────────
         fixed_cols = ['NRO', 'PM', 'PA', 'Nb adresses']
-        mode_cols  = [MODE_POSE_LABELS.get(m, m) for m in mode_order]
+        mode_cols  = [_mode_lbl(m) for m in mode_order]
         all_cols   = fixed_cols + mode_cols + ['Total cheminement']
 
         self.tbl_rapport.setSortingEnabled(False)
@@ -3160,11 +3165,14 @@ class QDRIPDialog(QDialog):
         bal_pa_fld  = _pick(bal_lyr, ['zapa', 'id_zapa', 'pa', 'id_pa'])
         bal_pm_fld  = _pick(bal_lyr, ['sro', 'id_ftth_pf', 'pmz', 'pm', 'nom_pm'])
         bal_pri_fld = _pick(bal_lyr, ['prises', 'nb_prises', 'nb_adresses', 'adresses', 'nb_pe'])
+        bal_fnames  = bal_lyr.fields().names()
         # Champs Infra
         mode_fld    = _pick(infra_lyr, ['mode_pose', 'mode_de_pose', 'modepose',
                                         'type_pose', 'type_infra', 'categorie', 'type', 'mode'])
+        statut_fld  = _pick(infra_lyr, ['statut', 'status', 'etat', 'etat_infra'])
         lng_fld     = _pick(infra_lyr, ['longueur', 'long', 'ml', 'metres', 'length', 'lg'])
         inf_pa_fld  = _pick(infra_lyr, ['zapa', 'id_zapa', 'pa', 'id_pa'])
+        infra_fnames = infra_lyr.fields().names()
 
         if pa_code_fld is None:
             self.lbl_dash_content.setText(
@@ -3194,11 +3202,13 @@ class QDRIPDialog(QDialog):
                 '<span style="color:#888;">Aucun PA trouvé dans la couche PA.</span>')
             return None
 
-        # ── Étape 2 : BAL → PM majoritaire + prises par PA ──────────────────
+        # ── Étape 2 : BAL → PM majoritaire + prises par PA (filtre _in_pm) ──
         bal_pm_counter = {}   # pa_code → Counter({pm: count})
         bal_prises     = {}   # pa_code → float
 
         for feat in bal_lyr.getFeatures():
+            if not self._in_pm(feat, bal_fnames):
+                continue
             pa_code = feat[bal_pa_fld] if bal_pa_fld else None
             if pa_code is None:
                 continue
@@ -3227,15 +3237,8 @@ class QDRIPDialog(QDialog):
             for pa_code, counter in bal_pm_counter.items()
         }
 
-        # ── Étape 3 : filtre PM ──────────────────────────────────────────────
-        if self.chk_pm.isChecked() and self._pm_set:
-            pm_lower = {str(p).lower() for p in self._pm_set}
-            valid_pa = {
-                c for c in pa_dict
-                if pa_pm.get(c, '').lower() in pm_lower
-            }
-        else:
-            valid_pa = set(pa_dict.keys())
+        # ── Étape 3 : PA valides = ceux qui ont au moins 1 BAL en périmètre ──
+        valid_pa = set(bal_pm_counter.keys())
 
         if not valid_pa:
             self.lbl_dash_content.setText(
@@ -3243,39 +3246,50 @@ class QDRIPDialog(QDialog):
             return [], {'nb_pa': 0, 'nb_pm': 0, 'nb_adresses': 0.0,
                         'total_cheminement': 0.0, 'per_mode': {}, 'layer_info': ''}, []
 
-        # ── Étape 4 : Infra → PA (attributaire ou spatial) ──────────────────
-        infra_by_pa = {}   # pa_code → {mode: float}
+        # ── Étape 4 : Infra → PA (filtre _in_pm + catégorie statut||mode_pose) 
+        infra_by_pa = {}   # pa_code → {code_categorie: float}
+
+        def _infra_code(feat):
+            """Construit le code catégorie = statut || mode_pose."""
+            sv = feat[statut_fld] if statut_fld else None
+            mv = feat[mode_fld]   if mode_fld   else None
+            s  = str(sv).strip() if sv is not None else ''
+            m  = str(mv).strip() if mv is not None else ''
+            return f'{s}{m}'
+
+        def _infra_length(feat):
+            lng = 0.0
+            if lng_fld:
+                try:
+                    v = feat[lng_fld]
+                    if v is not None:
+                        lng = float(v)
+                except (TypeError, ValueError):
+                    pass
+            if lng == 0.0:
+                try:
+                    g = feat.geometry()
+                    if g:
+                        lng = g.length()
+                except Exception:
+                    pass
+            return lng
 
         if inf_pa_fld:
             # Regroupement attributaire
             for feat in infra_lyr.getFeatures():
+                if not self._in_pm(feat, infra_fnames):
+                    continue
                 pa_code = feat[inf_pa_fld]
                 if pa_code is None:
                     continue
                 pa_code = str(pa_code).strip()
                 if pa_code not in valid_pa:
                     continue
-                mode = ''
-                if mode_fld:
-                    v = feat[mode_fld]
-                    mode = str(v).strip() if v is not None else ''
-                lng = 0.0
-                if lng_fld:
-                    try:
-                        v = feat[lng_fld]
-                        if v is not None:
-                            lng = float(v)
-                    except (TypeError, ValueError):
-                        pass
-                if lng == 0.0:
-                    try:
-                        g = feat.geometry()
-                        if g:
-                            lng = g.length()
-                    except Exception:
-                        pass
+                code = _infra_code(feat)
+                lng  = _infra_length(feat)
                 d = infra_by_pa.setdefault(pa_code, {})
-                d[mode] = d.get(mode, 0.0) + lng
+                d[code] = d.get(code, 0.0) + lng
         else:
             # Regroupement spatial : index sur les polygones PA
             valid_geoms = {c: pa_dict[c]['geom'] for c in valid_pa if pa_dict[c]['geom']}
@@ -3290,13 +3304,12 @@ class QDRIPDialog(QDialog):
                     fid_to_code[tmp_fid] = pa_code
 
                 for feat in infra_lyr.getFeatures():
+                    if not self._in_pm(feat, infra_fnames):
+                        continue
                     geom = feat.geometry()
                     if not geom or geom.isEmpty():
                         continue
-                    mode = ''
-                    if mode_fld:
-                        v = feat[mode_fld]
-                        mode = str(v).strip() if v is not None else ''
+                    code = _infra_code(feat)
                     candidates = pa_index.intersects(geom.boundingBox())
                     if not candidates:
                         continue
@@ -3325,17 +3338,18 @@ class QDRIPDialog(QDialog):
                         total_len = geom.length()
                     for pa_code, il in isect_per_pa.items():
                         ratio = il / total_isect if total_isect > 0 else 1.0
-                        lng = total_len * ratio
+                        lng   = total_len * ratio
                         d = infra_by_pa.setdefault(pa_code, {})
-                        d[mode] = d.get(mode, 0.0) + lng
+                        d[code] = d.get(code, 0.0) + lng
 
-        # ── Étape 5 : ordre des modes ────────────────────────────────────────
+        # ── Étape 5 : ordre des catégories ───────────────────────────────────
         all_modes = set()
         for modes in infra_by_pa.values():
             all_modes.update(modes.keys())
         known_order   = [k for k in MODE_POSE_LABELS if k in all_modes]
-        unknown_order = sorted(all_modes - set(known_order))
-        mode_order    = known_order + unknown_order
+        unknown_order = sorted((all_modes - set(known_order)) - {''})
+        has_empty     = '' in all_modes
+        mode_order    = known_order + unknown_order + ([''] if has_empty else [])
 
         # ── Étape 6 : lignes par PA ──────────────────────────────────────────
         pa_rows = []
