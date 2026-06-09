@@ -30,6 +30,13 @@ Plugin de contrôle qualité des données RIP Auvergne.
 
 ## Changelog
 
+### Version 1.2.0
+- Refonte de l'onglet **📤 Extractions** : sélecteur multi-types (QComboBox + QStackedWidget)
+- Nouveau type d'extraction : **BAL du périmètre PM**, colonnes `id_bal`, `nb_prises`, `pa`, `pmz`
+- Détection automatique des champs BAL (`id_metier`/`gid`/`fid`, `prises`/`nb_prises`/`nb_pe`, `zapa`/`id_zapa`/`pa`, `sro`/`id_ftth_pf`/`pmz`/`pm`/`nom_pm`)
+- Export **CSV**, **Excel** et **SHP** pour les deux types d'extraction
+- Auto-détection de la couche BAL extraction (PostGIS `rad_aw_2026.bal`, nom exact, fallback `bal` dans le nom)
+
 ### Version 1.1.9
 - Ajout d'un nouvel onglet **📤 Extractions**
 - Première extraction : **EPA / PA du périmètre PM courant**, filtré sur `self._pm_set`

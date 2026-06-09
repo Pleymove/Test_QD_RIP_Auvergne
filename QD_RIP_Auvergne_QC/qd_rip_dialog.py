@@ -20,6 +20,7 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox, QFormLayout, QProgressDialog, QMessageBox,
     QApplication, QAbstractItemView, QFileDialog, QFrame,
     QSplitter, QPlainTextEdit, QDialogButtonBox, QTextBrowser, QComboBox,
+    QStackedWidget,
 )
 from qgis.PyQt.QtCore import Qt, QUrl
 from qgis.PyQt.QtGui import QColor, QBrush, QFont, QDesktopServices
@@ -305,6 +306,10 @@ class QDRIPDialog(QDialog):
         if epa:
             self.cb_epa.setLayer(epa)
 
+        bal_ext = self._find_extraction_bal_layer()
+        if bal_ext:
+            self.cb_bal_extract.setLayer(bal_ext)
+
     def _find_extraction_pa_layer(self):
         """Locate the EPA/PA point layer for the Extractions tab.
 
@@ -346,6 +351,53 @@ class QDRIPDialog(QDialog):
                 candidates_p2.append(lyr)
             # Priority 3 — name contains 'pa' (zapa already excluded)
             elif 'pa' in name:
+                candidates_p3.append(lyr)
+
+        if candidates_p2:
+            return candidates_p2[0]
+        if candidates_p3:
+            return candidates_p3[0]
+        return None
+
+    def _find_extraction_bal_layer(self):
+        """Locate the BAL point layer for the Extractions tab.
+
+        Priority:
+          1. PostGIS source contains 'table="rad_aw_2026"."bal"'
+          2. Exact name in ('bal', 'georeso_bal', 'livrable_bal')
+          3. Name contains 'bal'  (point geometry)
+        """
+        from qgis.core import QgsWkbTypes
+        EXACT_NAMES = ('bal', 'georeso_bal', 'livrable_bal')
+        candidates_p2 = []
+        candidates_p3 = []
+
+        for lyr in QgsProject.instance().mapLayers().values():
+            if not hasattr(lyr, 'geometryType'):
+                continue
+            try:
+                if lyr.geometryType() != QgsWkbTypes.GeometryType.PointGeometry:
+                    continue
+            except Exception:
+                continue
+
+            src = ''
+            try:
+                src = lyr.source().lower()
+            except Exception:
+                pass
+
+            # Priority 1 — PostGIS source
+            if 'table="rad_aw_2026"."bal"' in src:
+                return lyr
+
+            name = lyr.name().strip().lower()
+
+            # Priority 2 — exact name
+            if name in EXACT_NAMES:
+                candidates_p2.append(lyr)
+            # Priority 3 — name contains 'bal'
+            elif 'bal' in name:
                 candidates_p3.append(lyr)
 
         if candidates_p2:
@@ -2439,12 +2491,72 @@ class QDRIPDialog(QDialog):
     # ─────────────────────────────────────────────────────────────────────────
     def _tab_extractions(self):
         root = QWidget()
-        h = QHBoxLayout(root)
+        main_v = QVBoxLayout(root)
+        main_v.setContentsMargins(6, 6, 6, 6)
 
-        cfg = QGroupBox('EPA / PA du périmètre PM')
+        # ── Type selector ──────────────────────────────────────────────────
+        type_bar = QHBoxLayout()
+        type_bar.addWidget(QLabel('<b>Type d\'extraction :</b>'))
+        self.cmb_extract_type = QComboBox()
+        self.cmb_extract_type.addItem('EPA / PA du périmètre PM')
+        self.cmb_extract_type.addItem('BAL du périmètre PM')
+        self.cmb_extract_type.setMinimumWidth(240)
+        self.cmb_extract_type.setToolTip(
+            'Choisir le type de données à extraire pour le périmètre PM courant.')
+        type_bar.addWidget(self.cmb_extract_type)
+        type_bar.addStretch()
+        main_v.addLayout(type_bar)
+
+        # ── Stacked pages ──────────────────────────────────────────────────
+        self.stk_extract = QStackedWidget()
+        self.cmb_extract_type.currentIndexChanged.connect(
+            self.stk_extract.setCurrentIndex)
+
+        self.stk_extract.addWidget(self._extract_panel_epa())   # index 0
+        self.stk_extract.addWidget(self._extract_panel_bal())   # index 1
+
+        main_v.addWidget(self.stk_extract, 1)
+        return root
+
+    # ── Extraction panel helpers ───────────────────────────────────────────
+
+    @staticmethod
+    def _extract_action_bar(tbl, zoom_slot, sel_slot, csv_slot, xlsx_slot, shp_slot,
+                            csv_tooltip=''):
+        """Build a standard Zoom/Sélectionner/CSV/Excel/SHP action bar."""
+        ab_w = QWidget()
+        ab_h = QHBoxLayout(ab_w)
+        ab_h.setContentsMargins(0, 2, 0, 2)
+        btn_zoom = QPushButton('🔍  Zoom')
+        btn_zoom.setToolTip('Double-clic sur une ligne pour zoomer directement')
+        btn_zoom.clicked.connect(zoom_slot)
+        ab_h.addWidget(btn_zoom)
+        btn_sel = QPushButton('✓  Sélectionner dans QGIS')
+        btn_sel.clicked.connect(sel_slot)
+        ab_h.addWidget(btn_sel)
+        ab_h.addStretch()
+        btn_csv = QPushButton('💾  Exporter CSV')
+        if csv_tooltip:
+            btn_csv.setToolTip(csv_tooltip)
+        btn_csv.clicked.connect(csv_slot)
+        ab_h.addWidget(btn_csv)
+        btn_xlsx = QPushButton('📊  Exporter Excel')
+        btn_xlsx.clicked.connect(xlsx_slot)
+        ab_h.addWidget(btn_xlsx)
+        btn_shp = QPushButton('🗺  Exporter SHP')
+        btn_shp.clicked.connect(shp_slot)
+        ab_h.addWidget(btn_shp)
+        return ab_w
+
+    def _extract_panel_epa(self):
+        """Build the EPA / PA extraction panel (page 0 of stk_extract)."""
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 4, 0, 0)
+
+        cfg = QGroupBox('Configuration')
         cfg.setFixedWidth(290)
         vbox = QVBoxLayout(cfg)
-
         frm = QFormLayout()
 
         self.cb_epa = QgsMapLayerComboBox()
@@ -2474,7 +2586,6 @@ class QDRIPDialog(QDialog):
         vbox.addWidget(btn_run)
         h.addWidget(cfg)
 
-        # ── Results panel ──────────────────────────────────────────────────
         res = QWidget()
         rv = QVBoxLayout(res)
         rv.setContentsMargins(0, 0, 0, 0)
@@ -2499,41 +2610,90 @@ class QDRIPDialog(QDialog):
             lambda idx: self._zoom_row(self.tbl_epa, idx.row()))
         rv.addWidget(self.tbl_epa)
 
-        # Action bar
-        ab_w = QWidget()
-        ab_h = QHBoxLayout(ab_w)
-        ab_h.setContentsMargins(0, 2, 0, 2)
-
-        btn_zoom = QPushButton('🔍  Zoom')
-        btn_zoom.setToolTip('Double-clic sur une ligne pour zoomer directement')
-        btn_zoom.clicked.connect(lambda: self._zoom_selected(self.tbl_epa))
-        ab_h.addWidget(btn_zoom)
-
-        btn_sel = QPushButton('✓  Sélectionner dans QGIS')
-        btn_sel.clicked.connect(lambda: self._select_qgis(self.tbl_epa))
-        ab_h.addWidget(btn_sel)
-
-        ab_h.addStretch()
-
-        btn_csv = QPushButton('💾  Exporter CSV')
-        btn_csv.setToolTip('Exporter id_epa;pmz en CSV (UTF-8, séparateur ;)')
-        btn_csv.clicked.connect(self._export_csv_epa)
-        ab_h.addWidget(btn_csv)
-
-        btn_xlsx = QPushButton('📊  Exporter Excel')
-        btn_xlsx.clicked.connect(
-            lambda: self._export_xlsx(self.tbl_epa, 'epa_perimetre_pm'))
-        ab_h.addWidget(btn_xlsx)
-
-        btn_shp = QPushButton('🗺  Exporter SHP')
-        btn_shp.setToolTip('Exporter les EPA visibles en Shapefile')
-        btn_shp.clicked.connect(
-            lambda: self._export_shp(self.tbl_epa, 'epa_perimetre_pm'))
-        ab_h.addWidget(btn_shp)
-
-        rv.addWidget(ab_w)
+        rv.addWidget(self._extract_action_bar(
+            self.tbl_epa,
+            zoom_slot  = lambda: self._zoom_selected(self.tbl_epa),
+            sel_slot   = lambda: self._select_qgis(self.tbl_epa),
+            csv_slot   = self._export_csv_epa,
+            xlsx_slot  = lambda: self._export_xlsx(self.tbl_epa, 'epa_perimetre_pm'),
+            shp_slot   = lambda: self._export_shp(self.tbl_epa, 'epa_perimetre_pm'),
+            csv_tooltip = 'Exporter id_epa;pmz en CSV (UTF-8, séparateur ;)',
+        ))
         h.addWidget(res, 1)
-        return root
+        return w
+
+    def _extract_panel_bal(self):
+        """Build the BAL extraction panel (page 1 of stk_extract)."""
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 4, 0, 0)
+
+        cfg = QGroupBox('Configuration')
+        cfg.setFixedWidth(290)
+        vbox = QVBoxLayout(cfg)
+        frm = QFormLayout()
+
+        self.cb_bal_extract = QgsMapLayerComboBox()
+        self.cb_bal_extract.setFilters(_F_POINT)
+        self.cb_bal_extract.setToolTip(
+            'Couche BAL (point).\n'
+            'Détection auto : source PostGIS table="rad_aw_2026"."bal",\n'
+            'puis nom exact "bal", "georeso_bal", "livrable_bal".'
+        )
+        frm.addRow('Couche BAL :', self.cb_bal_extract)
+        vbox.addLayout(frm)
+
+        info = QLabel(
+            '<small><i>Extrait toutes les BAL des PM du périmètre courant.<br>'
+            'Colonnes exportées : <b>id_bal</b>, <b>nb_prises</b>, <b>pa</b>, <b>pmz</b>.<br>'
+            'Champ id : id_metier &gt; gid &gt; fid.<br>'
+            'Champ PMZ : sro &gt; id_ftth_pf &gt; pmz &gt; pm &gt; nom_pm.</i></small>'
+        )
+        info.setWordWrap(True)
+        vbox.addWidget(info)
+        vbox.addStretch()
+
+        btn_run = QPushButton('🔎  Prévisualiser BAL')
+        btn_run.setStyleSheet('font-weight:bold; padding:6px;')
+        btn_run.clicked.connect(self._run_extract_bal)
+        vbox.addWidget(btn_run)
+        h.addWidget(cfg)
+
+        res = QWidget()
+        rv = QVBoxLayout(res)
+        rv.setContentsMargins(0, 0, 0, 0)
+
+        sh = QHBoxLayout()
+        sh.addWidget(QLabel('Recherche :'))
+        self.le_srch_bal_ext = QLineEdit()
+        self.le_srch_bal_ext.setPlaceholderText('Filtrer…')
+        self.le_srch_bal_ext.textChanged.connect(
+            lambda txt: self._filter_table(self.tbl_bal_ext, txt))
+        sh.addWidget(self.le_srch_bal_ext, 1)
+        self.lbl_cnt_bal_ext = QLabel('—')
+        sh.addWidget(self.lbl_cnt_bal_ext)
+        rv.addLayout(sh)
+
+        self.tbl_bal_ext = QTableWidget(0, 6)
+        self.tbl_bal_ext.setHorizontalHeaderLabels([
+            'id_bal', 'nb_prises', 'pa', 'pmz', 'Champ ID', 'Champ PMZ',
+        ])
+        self._style_table(self.tbl_bal_ext)
+        self.tbl_bal_ext.doubleClicked.connect(
+            lambda idx: self._zoom_row(self.tbl_bal_ext, idx.row()))
+        rv.addWidget(self.tbl_bal_ext)
+
+        rv.addWidget(self._extract_action_bar(
+            self.tbl_bal_ext,
+            zoom_slot  = lambda: self._zoom_selected(self.tbl_bal_ext),
+            sel_slot   = lambda: self._select_qgis(self.tbl_bal_ext),
+            csv_slot   = self._export_csv_bal,
+            xlsx_slot  = lambda: self._export_xlsx(self.tbl_bal_ext, 'bal_perimetre_pm'),
+            shp_slot   = lambda: self._export_shp(self.tbl_bal_ext, 'bal_perimetre_pm'),
+            csv_tooltip = 'Exporter id_bal;nb_prises;pa;pmz en CSV (UTF-8, séparateur ;)',
+        ))
+        h.addWidget(res, 1)
+        return w
 
     # ─────────────────────────────────────────────────────────────────────────
     # ANALYSIS – Tab 6: Extractions EPA
@@ -2646,6 +2806,107 @@ class QDRIPDialog(QDialog):
             with open(path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = _csv.writer(f, delimiter=';')
                 writer.writerow(['id_epa', 'pmz'])
+                writer.writerows(rows)
+            QMessageBox.information(self, 'Export CSV',
+                f'{len(rows)} ligne(s) exportée(s) :\n{path}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Erreur export CSV', str(e))
+
+    def _run_extract_bal(self):
+        bal_lyr = self.cb_bal_extract.currentLayer()
+        if bal_lyr is None:
+            QMessageBox.warning(self, 'Extraction BAL',
+                'Aucune couche BAL sélectionnée.')
+            return
+        if not self._pm_set:
+            QMessageBox.warning(self, 'Extraction BAL',
+                'Aucun PM chargé. Veuillez d\'abord charger le périmètre PM.')
+            return
+
+        fnames = [f.lower() for f in bal_lyr.fields().names()]
+        fnames_orig = bal_lyr.fields().names()
+
+        def _pick(candidates):
+            for c in candidates:
+                if c.lower() in fnames:
+                    return fnames_orig[fnames.index(c.lower())]
+            return None
+
+        id_field    = _pick(['id_metier', 'gid', 'fid'])
+        prises_field = _pick(['prises', 'nb_prises', 'nb_pe'])
+        pa_field    = _pick(['zapa', 'id_zapa', 'pa'])
+        pm_field    = _pick(['sro', 'id_ftth_pf', 'pmz', 'pm', 'nom_pm'])
+
+        if pm_field is None:
+            QMessageBox.critical(self, 'Extraction BAL',
+                f'Aucun champ PM trouvé dans "{bal_lyr.name()}".\n'
+                'Champs attendus : sro, id_ftth_pf, pmz, pm, nom_pm.')
+            return
+
+        layer_id = bal_lyr.id()
+        pm_set_lower = {str(p).lower() for p in self._pm_set}
+
+        self.tbl_bal_ext.setRowCount(0)
+        row_idx = 0
+        n_pm_hit = set()
+
+        for feat in bal_lyr.getFeatures():
+            pm_val = feat[pm_field]
+            if pm_val is None:
+                continue
+            if str(pm_val).lower() not in pm_set_lower:
+                continue
+            n_pm_hit.add(str(pm_val).lower())
+
+            id_val     = str(feat[id_field])     if id_field     else str(feat.id())
+            prises_val = str(feat[prises_field]) if prises_field else ''
+            pa_val     = str(feat[pa_field])     if pa_field     else ''
+            pmz_val    = str(pm_val)
+            id_fld_lbl = id_field or 'id QGIS'
+            pm_fld_lbl = pm_field
+
+            self.tbl_bal_ext.insertRow(row_idx)
+            it0 = QTableWidgetItem(id_val)
+            it0.setData(Qt.ItemDataRole.UserRole + 1, feat.id())
+            it0.setData(Qt.ItemDataRole.UserRole + 2, layer_id)
+            self.tbl_bal_ext.setItem(row_idx, 0, it0)
+            self.tbl_bal_ext.setItem(row_idx, 1, QTableWidgetItem(prises_val))
+            self.tbl_bal_ext.setItem(row_idx, 2, QTableWidgetItem(pa_val))
+            self.tbl_bal_ext.setItem(row_idx, 3, QTableWidgetItem(pmz_val))
+            self.tbl_bal_ext.setItem(row_idx, 4, QTableWidgetItem(id_fld_lbl))
+            self.tbl_bal_ext.setItem(row_idx, 5, QTableWidgetItem(pm_fld_lbl))
+            row_idx += 1
+
+        n = self.tbl_bal_ext.rowCount()
+        n_pm = len(n_pm_hit)
+        self.lbl_cnt_bal_ext.setText(f'{n} BAL')
+        self.lbl_status.setText(
+            f'BAL périmètre PM : {n} BAL exportables sur {n_pm} PM.')
+
+    def _export_csv_bal(self):
+        if self.tbl_bal_ext.rowCount() == 0:
+            QMessageBox.information(self, 'Export CSV',
+                'Aucune donnée à exporter.\nLancez d\'abord la prévisualisation BAL.')
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Exporter CSV', 'bal_perimetre_pm.csv', 'CSV (*.csv)')
+        if not path:
+            return
+        if not path.lower().endswith('.csv'):
+            path += '.csv'
+        try:
+            import csv as _csv
+            rows = []
+            for row in range(self.tbl_bal_ext.rowCount()):
+                if self.tbl_bal_ext.isRowHidden(row):
+                    continue
+                def _t(c):
+                    it = self.tbl_bal_ext.item(row, c)
+                    return it.text() if it else ''
+                rows.append([_t(0), _t(1), _t(2), _t(3)])
+            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = _csv.writer(f, delimiter=';')
+                writer.writerow(['id_bal', 'nb_prises', 'pa', 'pmz'])
                 writer.writerows(rows)
             QMessageBox.information(self, 'Export CSV',
                 f'{len(rows)} ligne(s) exportée(s) :\n{path}')
