@@ -301,6 +301,59 @@ class QDRIPDialog(QDialog):
         if pa_bal:
             self.cb_bal_pa.setLayer(pa_bal)
 
+        epa = self._find_extraction_pa_layer()
+        if epa:
+            self.cb_epa.setLayer(epa)
+
+    def _find_extraction_pa_layer(self):
+        """Locate the EPA/PA point layer for the Extractions tab.
+
+        Priority:
+          1. PostGIS source contains 'table="rad_aw_2026"."pa"' (not zapa)
+          2. Exact name in ('pa', 'georeso_pa', 'livrable_pa')
+          3. Name contains 'pa' but NOT 'zapa'  (point geometry)
+        """
+        from qgis.core import QgsWkbTypes
+        EXACT_NAMES = ('pa', 'georeso_pa', 'livrable_pa')
+        candidates_p2 = []
+        candidates_p3 = []
+
+        for lyr in QgsProject.instance().mapLayers().values():
+            if not hasattr(lyr, 'geometryType'):
+                continue
+            try:
+                if lyr.geometryType() != QgsWkbTypes.GeometryType.PointGeometry:
+                    continue
+            except Exception:
+                continue
+
+            src = ''
+            try:
+                src = lyr.source().lower()
+            except Exception:
+                pass
+
+            # Priority 1 — PostGIS source: pa table, explicitly not zapa
+            if 'table="rad_aw_2026"."pa"' in src and '"zapa"' not in src:
+                return lyr
+
+            name = lyr.name().strip().lower()
+            if 'zapa' in name:
+                continue
+
+            # Priority 2 — exact name
+            if name in EXACT_NAMES:
+                candidates_p2.append(lyr)
+            # Priority 3 — name contains 'pa' (zapa already excluded)
+            elif 'pa' in name:
+                candidates_p3.append(lyr)
+
+        if candidates_p2:
+            return candidates_p2[0]
+        if candidates_p3:
+            return candidates_p3[0]
+        return None
+
     # ─── top-level UI ────────────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -331,6 +384,7 @@ class QDRIPDialog(QDialog):
         self.tabs.addTab(self._tab_parcours(),         '📏  Parcours les plus longs')
         self.tabs.addTab(self._tab_bal(),              '📍  BAL éloignées infra')
         self.tabs.addTab(self._tab_pa_sans_infra(),    '🚫  PA sans infra')
+        self.tabs.addTab(self._tab_extractions(),      '📤  Extractions')
         self.tabs.addTab(self._tab_rapport(),          '📊  Tableau de bord')
         root.addWidget(self.tabs)
 
@@ -2381,8 +2435,226 @@ class QDRIPDialog(QDialog):
         self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
+    # TAB 6 – Extractions
     # ─────────────────────────────────────────────────────────────────────────
-    # TAB 6 – Tableau de bord (in-app live report)
+    def _tab_extractions(self):
+        root = QWidget()
+        h = QHBoxLayout(root)
+
+        cfg = QGroupBox('EPA / PA du périmètre PM')
+        cfg.setFixedWidth(290)
+        vbox = QVBoxLayout(cfg)
+
+        frm = QFormLayout()
+
+        self.cb_epa = QgsMapLayerComboBox()
+        self.cb_epa.setFilters(_F_POINT)
+        self.cb_epa.setToolTip(
+            'Couche EPA / PA (point).\n'
+            'Détection auto : source PostGIS table="rad_aw_2026"."pa",\n'
+            'puis nom exact "pa", "georeso_pa", "livrable_pa".\n'
+            'Ne sélectionne jamais une couche ZAPA.'
+        )
+        frm.addRow('Couche EPA / PA :', self.cb_epa)
+        vbox.addLayout(frm)
+
+        info = QLabel(
+            '<small><i>Extrait les EPA/PA rattachés aux PM du périmètre courant.<br>'
+            'Colonnes exportées : <b>id_epa</b>, <b>pmz</b>.<br>'
+            'Champ id : id_metier &gt; id_ftth &gt; gid &gt; fid.<br>'
+            'Champ PMZ : sro &gt; id_ftth_pf &gt; pmz &gt; pm &gt; nom_pm.</i></small>'
+        )
+        info.setWordWrap(True)
+        vbox.addWidget(info)
+        vbox.addStretch()
+
+        btn_run = QPushButton('🔎  Prévisualiser EPA')
+        btn_run.setStyleSheet('font-weight:bold; padding:6px;')
+        btn_run.clicked.connect(self._run_extract_epa)
+        vbox.addWidget(btn_run)
+        h.addWidget(cfg)
+
+        # ── Results panel ──────────────────────────────────────────────────
+        res = QWidget()
+        rv = QVBoxLayout(res)
+        rv.setContentsMargins(0, 0, 0, 0)
+
+        sh = QHBoxLayout()
+        sh.addWidget(QLabel('Recherche :'))
+        self.le_srch_epa = QLineEdit()
+        self.le_srch_epa.setPlaceholderText('Filtrer…')
+        self.le_srch_epa.textChanged.connect(
+            lambda txt: self._filter_table(self.tbl_epa, txt))
+        sh.addWidget(self.le_srch_epa, 1)
+        self.lbl_cnt_epa = QLabel('—')
+        sh.addWidget(self.lbl_cnt_epa)
+        rv.addLayout(sh)
+
+        self.tbl_epa = QTableWidget(0, 4)
+        self.tbl_epa.setHorizontalHeaderLabels([
+            'id_epa', 'pmz', 'Champ ID', 'Champ PMZ',
+        ])
+        self._style_table(self.tbl_epa)
+        self.tbl_epa.doubleClicked.connect(
+            lambda idx: self._zoom_row(self.tbl_epa, idx.row()))
+        rv.addWidget(self.tbl_epa)
+
+        # Action bar
+        ab_w = QWidget()
+        ab_h = QHBoxLayout(ab_w)
+        ab_h.setContentsMargins(0, 2, 0, 2)
+
+        btn_zoom = QPushButton('🔍  Zoom')
+        btn_zoom.setToolTip('Double-clic sur une ligne pour zoomer directement')
+        btn_zoom.clicked.connect(lambda: self._zoom_selected(self.tbl_epa))
+        ab_h.addWidget(btn_zoom)
+
+        btn_sel = QPushButton('✓  Sélectionner dans QGIS')
+        btn_sel.clicked.connect(lambda: self._select_qgis(self.tbl_epa))
+        ab_h.addWidget(btn_sel)
+
+        ab_h.addStretch()
+
+        btn_csv = QPushButton('💾  Exporter CSV')
+        btn_csv.setToolTip('Exporter id_epa;pmz en CSV (UTF-8, séparateur ;)')
+        btn_csv.clicked.connect(self._export_csv_epa)
+        ab_h.addWidget(btn_csv)
+
+        btn_xlsx = QPushButton('📊  Exporter Excel')
+        btn_xlsx.clicked.connect(
+            lambda: self._export_xlsx(self.tbl_epa, 'epa_perimetre_pm'))
+        ab_h.addWidget(btn_xlsx)
+
+        btn_shp = QPushButton('🗺  Exporter SHP')
+        btn_shp.setToolTip('Exporter les EPA visibles en Shapefile')
+        btn_shp.clicked.connect(
+            lambda: self._export_shp(self.tbl_epa, 'epa_perimetre_pm'))
+        ab_h.addWidget(btn_shp)
+
+        rv.addWidget(ab_w)
+        h.addWidget(res, 1)
+        return root
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ANALYSIS – Tab 6: Extractions EPA
+    # ─────────────────────────────────────────────────────────────────────────
+    def _run_extract_epa(self):
+        pa_lyr = self.cb_epa.currentLayer()
+        if not pa_lyr:
+            QMessageBox.warning(self, 'Erreur',
+                                'Sélectionnez la couche EPA / PA (point).')
+            return
+
+        if not self._pm_set:
+            QMessageBox.warning(self, 'Périmètre PM vide',
+                'Aucun PM dans le périmètre courant.\n'
+                'Ajoutez des PM via le bouton "Modifier la liste…".')
+            return
+
+        fnames = pa_lyr.fields().names()
+
+        # Detect best id_epa field
+        id_field = None
+        for f in ('id_metier', 'id_ftth', 'gid', 'fid'):
+            if f in fnames:
+                id_field = f
+                break
+
+        # Detect best pmz field
+        pm_field = None
+        for f in ('sro', 'id_ftth_pf', 'pmz', 'pm', 'nom_pm'):
+            if f in fnames:
+                pm_field = f
+                break
+
+        if pm_field is None:
+            preview = ', '.join(fnames[:10]) + ('…' if len(fnames) > 10 else '')
+            QMessageBox.warning(self, 'Champs PMZ manquants',
+                f'Impossible de filtrer la couche EPA/PA : aucun champ PMZ/SRO trouvé.\n'
+                f'Champs cherchés : sro, id_ftth_pf, pmz, pm, nom_pm.\n'
+                f'Champs disponibles : {preview}')
+            return
+
+        self.lbl_status.setText('Extraction EPA en cours…')
+        QApplication.processEvents()
+
+        results = []
+        for ft in pa_lyr.getFeatures():
+            pmz_val = ft[pm_field]
+            if pmz_val is None:
+                continue
+            pmz_str = str(pmz_val).strip()
+            if pmz_str not in self._pm_set:
+                continue
+            id_str = (str(ft[id_field]) if id_field and ft[id_field] is not None
+                      else str(ft.id()))
+            results.append(dict(
+                fid      = ft.id(),
+                layer_id = pa_lyr.id(),
+                id_epa   = id_str,
+                pmz      = pmz_str,
+                id_field = id_field or '(QGIS id)',
+                pm_field = pm_field,
+            ))
+
+        self.tbl_epa.setSortingEnabled(False)
+        self.tbl_epa.setRowCount(0)
+        for r in results:
+            row = self.tbl_epa.rowCount()
+            self.tbl_epa.insertRow(row)
+            cells = [
+                _si(r['id_epa']),
+                _si(r['pmz']),
+                _si(r['id_field']),
+                _si(r['pm_field']),
+            ]
+            for col, item in enumerate(cells):
+                self.tbl_epa.setItem(row, col, item)
+            self.tbl_epa.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, r['fid'])
+            self.tbl_epa.item(row, 0).setData(Qt.ItemDataRole.UserRole + 2, r['layer_id'])
+        self.tbl_epa.setSortingEnabled(True)
+
+        n     = len(results)
+        n_pm  = len(self._pm_set)
+        self.lbl_cnt_epa.setText(f'{n} EPA / {n_pm} PM')
+        self.lbl_status.setText(
+            f'EPA périmètre PM : {n} EPA exportables sur {n_pm} PM.')
+
+    def _export_csv_epa(self):
+        """Export id_epa;pmz as UTF-8-sig CSV (visible rows only)."""
+        if self.tbl_epa.rowCount() == 0:
+            QMessageBox.information(self, 'Export CSV',
+                'Aucune donnée à exporter.\nLancez d\'abord la prévisualisation EPA.')
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Exporter CSV', 'epa_perimetre_pm.csv', 'CSV (*.csv)')
+        if not path:
+            return
+        if not path.lower().endswith('.csv'):
+            path += '.csv'
+        try:
+            import csv as _csv
+            rows = []
+            for row in range(self.tbl_epa.rowCount()):
+                if self.tbl_epa.isRowHidden(row):
+                    continue
+                id_epa = (self.tbl_epa.item(row, 0).text()
+                          if self.tbl_epa.item(row, 0) else '')
+                pmz    = (self.tbl_epa.item(row, 1).text()
+                          if self.tbl_epa.item(row, 1) else '')
+                rows.append([id_epa, pmz])
+            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = _csv.writer(f, delimiter=';')
+                writer.writerow(['id_epa', 'pmz'])
+                writer.writerows(rows)
+            QMessageBox.information(self, 'Export CSV',
+                f'{len(rows)} ligne(s) exportée(s) :\n{path}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Erreur export CSV', str(e))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 7 – Tableau de bord (in-app live report)
     # ─────────────────────────────────────────────────────────────────────────
 
     def _tab_rapport(self):
