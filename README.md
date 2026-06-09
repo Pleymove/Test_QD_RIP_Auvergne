@@ -30,6 +30,10 @@ Plugin de contrôle qualité des données RIP Auvergne.
 
 ## Changelog
 
+### Version 1.2.1
+- Correction de l'extraction **BAL** : les colonnes `nb_prises`, `pa`, `pmz` n'étaient pas remplies à cause du tri actif pendant le remplissage du tableau
+- Le tri est désormais désactivé pendant le remplissage puis réactivé (même logique que l'extraction EPA)
+
 ### Version 1.2.0
 - Refonte de l'onglet **📤 Extractions** : sélecteur multi-types (QComboBox + QStackedWidget)
 - Nouveau type d'extraction : **BAL du périmètre PM**, colonnes `id_bal`, `nb_prises`, `pa`, `pmz`

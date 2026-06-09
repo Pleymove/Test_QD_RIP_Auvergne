@@ -2846,6 +2846,7 @@ class QDRIPDialog(QDialog):
         layer_id = bal_lyr.id()
         pm_set_lower = {str(p).lower() for p in self._pm_set}
 
+        self.tbl_bal_ext.setSortingEnabled(False)
         self.tbl_bal_ext.setRowCount(0)
         row_idx = 0
         n_pm_hit = set()
@@ -2877,6 +2878,7 @@ class QDRIPDialog(QDialog):
             self.tbl_bal_ext.setItem(row_idx, 5, QTableWidgetItem(pm_fld_lbl))
             row_idx += 1
 
+        self.tbl_bal_ext.setSortingEnabled(True)
         n = self.tbl_bal_ext.rowCount()
         n_pm = len(n_pm_hit)
         self.lbl_cnt_bal_ext.setText(f'{n} BAL')
