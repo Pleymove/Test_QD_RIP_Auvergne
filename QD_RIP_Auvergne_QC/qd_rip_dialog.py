@@ -4,7 +4,7 @@ Onglets :
   1. Chevauchements C0 / couches existantes
   2. Doublons dans l'infra (parcours superposés)
   3. Parcours les plus longs
-  4. BAL isolées (aucun voisin BAL dans un rayon donné)
+  4. BAL éloignées infra (distance BAL→infra par PM, rayon isolation optionnel)
   5. PA sans infra (ZAPA sans infra dans le groupement livrables)
 """
 
@@ -329,7 +329,7 @@ class QDRIPDialog(QDialog):
         self.tabs.addTab(self._tab_chevauchement(),    '⚠  Chevauchements C0 / Existant')
         self.tabs.addTab(self._tab_doublons(),         '⛔  Doublons Infra')
         self.tabs.addTab(self._tab_parcours(),         '📏  Parcours les plus longs')
-        self.tabs.addTab(self._tab_bal(),              '📍  BAL Isolées')
+        self.tabs.addTab(self._tab_bal(),              '📍  BAL éloignées infra')
         self.tabs.addTab(self._tab_pa_sans_infra(),    '🚫  PA sans infra')
         self.tabs.addTab(self._tab_rapport(),          '📊  Tableau de bord')
         root.addWidget(self.tabs)
@@ -722,7 +722,7 @@ class QDRIPDialog(QDialog):
         return root
 
     # ─────────────────────────────────────────────────────────────────────────
-    # TAB 4 – BAL Isolées
+    # TAB 4 – BAL éloignées infra
     # ─────────────────────────────────────────────────────────────────────────
     def _tab_bal(self):
         root = QWidget()
@@ -763,7 +763,7 @@ class QDRIPDialog(QDialog):
         frm.addRow('Périmètre PM (za_sro) :', self.cb_zasro)
 
         self.sp_rayon = QSpinBox()
-        self.sp_rayon.setRange(50, 10000)
+        self.sp_rayon.setRange(0, 999999999)
         self.sp_rayon.setValue(500)
         self.sp_rayon.setSuffix(' m')
         self.sp_rayon.setToolTip(
@@ -774,10 +774,45 @@ class QDRIPDialog(QDialog):
 
         vbox.addLayout(frm)
 
+        # ── Rayon d'isolation activé / désactivé ─────────────────────────────
+        self.chk_use_rayon = QCheckBox('Utiliser le rayon d\'isolation')
+        self.chk_use_rayon.setChecked(True)
+        self.chk_use_rayon.setToolTip(
+            'Si coché, seules les BAL sans voisin dans le rayon sont analysées.\n'
+            'Si décoché, toutes les BAL du périmètre PM sont analysées et la\n'
+            'distance à l\'infra la plus proche est calculée pour chacune.'
+        )
+        self.chk_use_rayon.toggled.connect(self.sp_rayon.setEnabled)
+        vbox.addWidget(self.chk_use_rayon)
+
+        # ── Filtre distance infra ─────────────────────────────────────────────
+        self.chk_flt_dist = QCheckBox('Filtrer par distance à l\'infra la plus proche')
+        self.chk_flt_dist.setChecked(True)
+        self.chk_flt_dist.setToolTip(
+            'Si coché, seules les BAL dont la distance à l\'infra la plus\n'
+            'proche est >= au seuil ci-dessous sont affichées.\n'
+            'Les BAL sans infra trouvée dans leur PM sont toujours affichées.'
+        )
+        vbox.addWidget(self.chk_flt_dist)
+
+        frm2 = QFormLayout()
+        self.sp_dist_min = QSpinBox()
+        self.sp_dist_min.setRange(0, 999999999)
+        self.sp_dist_min.setValue(1000)
+        self.sp_dist_min.setSuffix(' m')
+        self.sp_dist_min.setToolTip(
+            'Afficher uniquement les BAL dont la distance à l\'infra\n'
+            'la plus proche dans le même PM est >= à cette valeur.'
+        )
+        frm2.addRow('Distance infra min. :', self.sp_dist_min)
+        self.chk_flt_dist.toggled.connect(self.sp_dist_min.setEnabled)
+        vbox.addLayout(frm2)
+
         info = QLabel(
-            '<small><i>Pour chaque BAL isolée, l\'infra la plus proche est cherchée '
+            '<small><i>Pour chaque BAL analysée, l\'infra la plus proche est cherchée '
             'dans la même PM (champ sro). Si le sro est absent, repli sur le polygone '
-            'za_sro contenant la BAL. Le type réel (C0, E0, E7…) est affiché.</i></small>'
+            'za_sro. Le type réel (C0, E0, E7…) est affiché.<br>'
+            'Les BAL sans infra dans leur PM sont toujours remontées.</i></small>'
         )
         info.setWordWrap(True)
         vbox.addWidget(info)
@@ -818,7 +853,7 @@ class QDRIPDialog(QDialog):
             'ID BAL', 'SRO BAL',
             'ID Infra proche', 'Dist. infra (m)', 'Long. infra (m)',
             'SRO infra', 'id_pa infra',
-            'Type infra',   # C0, C1, E0, E1...
+            'Type infra',
         ])
         self._style_table(self.tbl_bal)
         self.tbl_bal.doubleClicked.connect(
@@ -829,10 +864,10 @@ class QDRIPDialog(QDialog):
         ab, bz, bs, bc = self._action_bar(self.tbl_bal, 'bal')
         bz.clicked.connect(lambda: self._zoom_selected(self.tbl_bal))
         bs.clicked.connect(lambda: self._select_qgis(self.tbl_bal))
-        bc.clicked.connect(lambda: self._export_xlsx(self.tbl_bal, 'bal_isolees'))
+        bc.clicked.connect(lambda: self._export_xlsx(self.tbl_bal, 'bal_eloignees'))
         btn_shp_bal = QPushButton('🗺  Exporter SHP')
         btn_shp_bal.setToolTip('Exporter les entités visibles en Shapefile')
-        btn_shp_bal.clicked.connect(lambda: self._export_shp(self.tbl_bal, 'bal_isolees'))
+        btn_shp_bal.clicked.connect(lambda: self._export_shp(self.tbl_bal, 'bal_eloignees'))
         ab.layout().addWidget(btn_shp_bal)
         rv.addWidget(ab)
 
@@ -1200,7 +1235,7 @@ class QDRIPDialog(QDialog):
         self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # ANALYSIS – Tab 4: BAL Isolées
+    # ANALYSIS – Tab 4: BAL éloignées infra
     # ─────────────────────────────────────────────────────────────────────────
     def _run_bal(self):
         bal_lyr   = self.cb_bal.currentLayer()
@@ -1209,8 +1244,11 @@ class QDRIPDialog(QDialog):
             QMessageBox.warning(self, 'Erreur', 'Sélectionnez les couches BAL et Infra.')
             return
 
-        radius     = float(self.sp_rayon.value())
-        infra_flt  = self.le_flt_bal.text().strip()
+        use_rayon   = self.chk_use_rayon.isChecked()
+        use_flt_dist = self.chk_flt_dist.isChecked()
+        radius      = float(self.sp_rayon.value())
+        dist_min    = float(self.sp_dist_min.value()) if use_flt_dist else 0.0
+        infra_flt   = self.le_flt_bal.text().strip()
 
         self.lbl_status.setText('Construction des index…')
         QApplication.processEvents()
@@ -1274,8 +1312,9 @@ class QDRIPDialog(QDialog):
         _bal_fn = bal_lyr.fields().names()
         all_bal = [b for b in all_bal if self._in_pm(b, _bal_fn)]
 
+        lbl_analyse = ('BAL isolées…' if use_rayon else 'BAL éloignées…')
         prog = QProgressDialog(
-            'Analyse BAL isolées…', 'Annuler', 0, len(all_bal), self)
+            lbl_analyse, 'Annuler', 0, len(all_bal), self)
         prog.setWindowTitle('Analyse en cours')
         prog.setMinimumDuration(0)
         prog.setWindowModality(Qt.WindowModality.WindowModal)
@@ -1287,25 +1326,26 @@ class QDRIPDialog(QDialog):
             if prog.wasCanceled():
                 break
             if i % 50 == 0:
-                prog.setLabelText(f'BAL isolées… {i}/{len(all_bal)} ({100*i//len(all_bal)} %)')
+                pct = 100 * i // len(all_bal) if all_bal else 0
+                prog.setLabelText(f'{lbl_analyse} {i}/{len(all_bal)} ({pct} %)')
                 QApplication.processEvents()
 
             bg = bal_ft.geometry()
             if not bg or bg.isEmpty():
                 continue
 
-            # Count BAL neighbors within radius
-            bbox = bg.boundingBox()
-            bbox.grow(radius)
-            nb_voisins = 0
-            for nfid in bal_idx.intersects(bbox):
-                if nfid == bal_ft.id():
+            # ── Mode A : rayon d'isolation activé ────────────────────────────
+            if use_rayon:
+                bbox = bg.boundingBox()
+                bbox.grow(radius)
+                nb_voisins = 0
+                for nfid in bal_idx.intersects(bbox):
+                    if nfid == bal_ft.id():
+                        continue
+                    if bg.distance(bal_fd[nfid].geometry()) <= radius:
+                        nb_voisins += 1
+                if nb_voisins > 0:
                     continue
-                if bg.distance(bal_fd[nfid].geometry()) <= radius:
-                    nb_voisins += 1
-
-            if nb_voisins > 0:
-                continue
 
             # ── Déterminer la PM effective de cette BAL ──────────────────────
             # Étape 1 : champ sro de la BAL
@@ -1322,7 +1362,7 @@ class QDRIPDialog(QDialog):
                         break
 
             # ── Chercher l'infra la plus proche dans la même PM ──────────────
-            search_radius = max(radius * 10, 5000.0)
+            search_radius = max(radius * 10, 5000.0) if use_rayon else 50000.0
             ibbox = bg.boundingBox()
             ibbox.grow(search_radius)
             candidates = infra_idx.intersects(ibbox)
@@ -1338,6 +1378,13 @@ class QDRIPDialog(QDialog):
                     nearest_fid  = ifid
 
             nf = infra_fd[nearest_fid] if nearest_fid is not None else None
+
+            # ── Filtre distance infra ─────────────────────────────────────────
+            # BAL sans infra dans leur PM : toujours remontées
+            # BAL avec infra trouvée : filtrer si use_flt_dist
+            if use_flt_dist and nf is not None and nearest_dist < dist_min:
+                continue
+
             bal_gid = (str(bal_ft['gid'])
                        if 'gid' in _bal_fn and bal_ft['gid'] is not None
                        else str(bal_ft.id()))
@@ -1346,7 +1393,6 @@ class QDRIPDialog(QDialog):
                 bal_gid        = bal_gid,
                 bal_layer_id   = bal_lyr.id(),
                 bal_sro        = bal_sro,
-                nb_voisins     = nb_voisins,
                 infra_fid      = nearest_fid if nf is not None else -1,
                 dist_infra     = nearest_dist if nf is not None else float('inf'),
                 infra_long     = _infra_long(nf) if nf is not None else 0.0,
@@ -1359,7 +1405,7 @@ class QDRIPDialog(QDialog):
 
         prog.setValue(len(all_bal))
 
-        # Sort: farthest from infra first (most critical isolated BAL)
+        # Sort: farthest from infra first (most critical BAL)
         results.sort(key=lambda x: x['dist_infra'], reverse=True)
 
         self.tbl_bal.setSortingEnabled(False)
@@ -1378,7 +1424,7 @@ class QDRIPDialog(QDialog):
                 _ni(f"{r['infra_long']:.1f}"),
                 _si(r['infra_sro']),
                 _si(r['infra_idpa']),
-                _si(r['infra_type']),   # C0, C1, E0, E1...
+                _si(r['infra_type']),
             ]
             for col, item in enumerate(cells):
                 self.tbl_bal.setItem(row, col, item)
@@ -1398,9 +1444,23 @@ class QDRIPDialog(QDialog):
         self.cmb_bal_type.blockSignals(False)
 
         n = len(results)
-        self.lbl_cnt_bal.setText(f'{n} BAL isolée(s)')
+        n_total = len(all_bal)
+
+        if use_rayon:
+            cnt_txt = f'{n} BAL éloignée(s) — rayon {int(radius)} m'
+        else:
+            cnt_txt = f'{n} BAL affichées sur {n_total} analysées'
+        if use_flt_dist:
+            cnt_txt += f' — dist. ≥ {int(dist_min)} m'
+        else:
+            cnt_txt += ' — sans filtre dist.'
+
+        self.lbl_cnt_bal.setText(cnt_txt)
         self.lbl_status.setText(
-            f'BAL isolées : {n} sur {len(all_bal)} BAL totales.')
+            f'BAL éloignées : {n} affichées'
+            + (f' — rayon {int(radius)} m' if use_rayon else f' sur {n_total} analysées')
+            + (f', dist. ≥ {int(dist_min)} m' if use_flt_dist else '')
+            + '.')
         self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -2469,7 +2529,7 @@ class QDRIPDialog(QDialog):
             f'{_kpi(n_chev, "Chevauchements", _c(n_chev), f"{total_ov_chev:,.1f} m")}'
             f'{_kpi(n_doub, "Doublons", _c(n_doub), f"{total_ov_doub:,.1f} m")}'
             f'{_kpi(n_parc, "Parcours listés", "#1a6faf", f"{total_len_parc:,.0f} m total")}'
-            f'{_kpi(n_bal, "BAL isolées", _c(n_bal), avg_dist_bal or "—")}'
+            f'{_kpi(n_bal, "BAL éloignées", _c(n_bal), avg_dist_bal or "—")}'
             f'{_kpi(n_pa_sans, "PA sans infra", _c(n_pa_sans))}'
             f'</tr></table>'
         )
@@ -2513,13 +2573,13 @@ class QDRIPDialog(QDialog):
         # ── BAL ───────────────────────────────────────────────────────────────
         bal_body = (
             f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
-            f'{_kpi(n_bal, "BAL isolées", _c(n_bal))}'
+            f'{_kpi(n_bal, "BAL éloignées", _c(n_bal))}'
             f'{_kpi(avg_dist_bal or "—", "Distance moy. à infra")}'
             f'<td></td><td></td>'
             f'</tr></table>'
             + _img('bal_dist')
         )
-        bal_section = _section('📍', 'BAL Isolées', '#e67e22', bal_body)
+        bal_section = _section('📍', 'BAL éloignées infra', '#e67e22', bal_body)
 
         # ── PA sans infra ─────────────────────────────────────────────────────
         n_disc_pa = len(pa) - n_pa_sans
@@ -2696,9 +2756,9 @@ class QDRIPDialog(QDialog):
                         if h > 0:
                             ax.text(p.get_x() + p.get_width() / 2., h,
                                     str(int(h)), ha='center', va='bottom', fontsize=7)
-                    ax.set_xlabel("Distance à l'infra C0 la plus proche (m)", fontsize=9)
+                    ax.set_xlabel("Distance à l'infra la plus proche (m)", fontsize=9)
                     ax.set_ylabel('Nombre de BAL', fontsize=9)
-                    ax.set_title('Distribution des distances BAL isolées → Infra C0', fontsize=11,
+                    ax.set_title('Distribution des distances BAL → Infra', fontsize=11,
                                  fontweight='bold', pad=10)
                     ax.spines['top'].set_visible(False)
                     ax.spines['right'].set_visible(False)
@@ -2837,13 +2897,13 @@ class QDRIPDialog(QDialog):
                 avg_dist = f'{sum(dists)/len(dists):,.1f} m'
             bal_section = f'''
             <section>
-                <h2>📍 BAL Isolées</h2>
+                <h2>📍 BAL éloignées infra</h2>
                 <div class="kpi-row">
-                    {_kpi(n_bal, 'BAL isolées',
+                    {_kpi(n_bal, 'BAL éloignées',
                           '#c0392b' if n_bal > 0 else '#27ae60')}
                     {_kpi(avg_dist or "—", "Distance moy. à l'infra")}
                 </div>
-                {_chart('bal_dist', 'Distribution des distances BAL → Infra C0')}
+                {_chart('bal_dist', 'Distribution des distances BAL → Infra')}
             </section>'''
 
         no_data_warn = ''
