@@ -30,6 +30,17 @@ Plugin de contrôle qualité des données RIP Auvergne.
 
 ## Changelog
 
+### Version 1.4.0
+- Intégration **Notion** : affichage de l'état métier (« État ») des PA et BAL dans l'onglet **📤 Extractions**
+- Nouvelle colonne **État Notion** (avec pastille de couleur reprenant la couleur du statut Notion) sur les tableaux EPA/PA et BAL extraits
+- Filtre déroulant **État Notion** au-dessus de chaque tableau, combinable avec la recherche texte existante
+- Bouton **🔗 Ouvrir dans Notion** pour ouvrir la page Notion de la ligne sélectionnée
+- Bouton **⚙️ Réglages Notion** : jeton d'intégration (jamais stocké dans le code, uniquement en local via `QSettings`) + identifiants des bases « Suivi PA » et « Suivi BAL »
+- Mise en cache des états Notion après le premier appel + bouton **🔄 Rafraîchir Notion** pour forcer le rechargement
+- Dégradation propre si le jeton est absent ou l'appel réseau échoue : colonne et filtre masqués, message discret « État Notion indisponible », aucun blocage des autres fonctionnalités
+- Jointure PA sur `id_epa` et BAL sur `id_bal` (titre des pages Notion), cohérente avec les colonnes déjà exportées par l'onglet Extractions
+- Nouveau module `notion_client.py` (appels HTTP paginés vers l'API Notion via `QgsBlockingNetworkRequest`)
+
 ### Version 1.3.0
 - Refonte de l'onglet **📊 Tableau de bord**, désormais **autonome** (ne nécessite plus de lancer les autres analyses)
 - **Section Dashboard** : chiffres clés du périmètre (nb PA, nb PM, nb adresses, total cheminement) + répartition du cheminement par catégorie d'infra (étiquettes `mode_pose` via `MODE_POSE_LABELS`)
