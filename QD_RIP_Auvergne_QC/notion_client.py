@@ -29,6 +29,14 @@ NOTION_API_BASE = 'https://api.notion.com/v1'
 NOTION_PAGE_SIZE = 100
 NOTION_TIMEOUT_MS = 10000
 
+# Identifiants des bases Notion (database_id, 32 caractères hexadécimaux).
+# Ce ne sont PAS des secrets : ils peuvent être codés en dur. Ils sont
+# extraits de l'URL des bases Notion (chaîne avant le "?", tirets retirés).
+#   - BDD Suivi PA Auvergne  : https://app.notion.com/p/37a1eb58862a805bb9a8d6ecff31e805
+#   - BDD Suivi BAL Auvergne : https://app.notion.com/p/37a1eb58862a80abb5b6c6db9a13ca93
+NOTION_DB_PA = '37a1eb58862a805bb9a8d6ecff31e805'
+NOTION_DB_BAL = '37a1eb58862a80abb5b6c6db9a13ca93'
+
 # Couleurs de statut Notion -> QColor (point de couleur affiché dans les tableaux)
 NOTION_COLOR_MAP = {
     'default': '#9b9a97',
