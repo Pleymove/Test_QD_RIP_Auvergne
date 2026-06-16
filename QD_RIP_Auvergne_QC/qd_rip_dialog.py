@@ -22,7 +22,7 @@ from qgis.PyQt.QtWidgets import (
     QSplitter, QPlainTextEdit, QDialogButtonBox, QTextBrowser, QComboBox,
     QStackedWidget,
 )
-from qgis.PyQt.QtCore import Qt, QUrl, QSettings
+from qgis.PyQt.QtCore import Qt, QUrl, QSettings, QThread
 from qgis.PyQt.QtGui import QColor, QBrush, QFont, QDesktopServices, QIcon, QPixmap, QPainter
 
 from qgis.core import (
@@ -33,10 +33,7 @@ from qgis.gui import QgsMapLayerComboBox
 from qgis.utils import iface
 
 from .pm_perimeter import DEFAULT_PM_CODES
-from .notion_client import (
-    fetch_database_states, notion_color_to_qcolor, NotionClientError,
-    NOTION_DB_PA, NOTION_DB_BAL,
-)
+from .notion_client import NotionFetchWorker, notion_color_to_qcolor
 
 # Réglages QSettings pour l'intégration Notion (jeton JAMAIS stocké dans le code)
 NOTION_SETTINGS_GROUP = 'QD_RIP_Auvergne/notion'
@@ -121,7 +118,12 @@ class QDRIPDialog(QDialog):
         # ── État Notion (PA / BAL) ──────────────────────────────────────────
         self._notion_pa_map = None      # dict id_epa -> {etat, couleur, url} ou None
         self._notion_bal_map = None     # dict id_bal -> {etat, couleur, url} ou None
-        self._notion_loaded = False     # True dès qu'une tentative de chargement a eu lieu
+        self._notion_loaded = False     # True dès qu'un chargement a été lancé
+        self._notion_msg_pa = ''        # message de dégradation (PA) si échec
+        self._notion_msg_bal = ''       # message de dégradation (BAL) si échec
+        self._notion_registry = []      # liste de tableaux ayant une colonne État Notion
+        self._notion_thread = None      # QThread de chargement en cours, ou None
+        self._notion_worker = None      # NotionFetchWorker associé au thread en cours
         self.setWindowTitle('QD RIP Auvergne — Contrôle Qualité')
         self.setMinimumSize(980, 700)
         self.resize(1200, 800)
@@ -495,6 +497,17 @@ class QDRIPDialog(QDialog):
         bar.addWidget(btn_close)
         root.addLayout(bar)
 
+        # Chargement Notion en arrière-plan dès l'ouverture (cache réutilisé
+        # par toutes les listes ci-dessus ; aucun appel réseau si pas de jeton).
+        self._ensure_notion_loaded()
+
+    def closeEvent(self, event):
+        """Arrête proprement le thread de chargement Notion s'il est actif."""
+        if self._notion_thread is not None:
+            self._notion_thread.quit()
+            self._notion_thread.wait()
+        super().closeEvent(event)
+
     # ─── périmètre PM ─────────────────────────────────────────────────────────
 
     def _refresh_pm_label(self):
@@ -542,15 +555,32 @@ class QDRIPDialog(QDialog):
         tbl.verticalHeader().setDefaultSectionSize(22)
         tbl.setWordWrap(False)
 
-    @staticmethod
-    def _filter_table(tbl, text):
-        text = text.lower()
+    def _notion_etat_ok(self, tbl, row):
+        """True si la ligne satisfait tous les filtres État Notion actifs du tableau."""
+        for reg in self._notion_registry:
+            if reg['tbl'] is tbl and reg['combo'].isVisible():
+                val = reg['combo'].currentText()
+                if val and val != 'Tous':
+                    cell = tbl.item(row, reg['col'])
+                    if not (cell and cell.text() == val):
+                        return False
+        return True
+
+    def _filter_table_multi(self, tbl, text, extra_predicate=None):
+        """Filtre combiné : recherche texte + tous les filtres État Notion du tableau.
+
+        extra_predicate(row) -> bool permet d'ajouter une condition supplémentaire
+        (ex. filtre type d'infra sur le tableau BAL).
+        """
+        text = (text or '').lower()
         for row in range(tbl.rowCount()):
-            visible = not text or any(
+            text_ok = not text or any(
                 text in (tbl.item(row, c).text().lower() if tbl.item(row, c) else '')
                 for c in range(tbl.columnCount())
             )
-            tbl.setRowHidden(row, not visible)
+            etat_ok = self._notion_etat_ok(tbl, row)
+            extra_ok = extra_predicate(row) if extra_predicate else True
+            tbl.setRowHidden(row, not (text_ok and etat_ok and extra_ok))
 
     @staticmethod
     def _action_bar(tbl, tab_key, extra_widgets=None):
@@ -630,55 +660,68 @@ class QDRIPDialog(QDialog):
             self._ensure_notion_loaded(force=True)
 
     def _ensure_notion_loaded(self, force=False):
-        """Charge (ou recharge) les états Notion PA / BAL, avec mise en cache.
+        """Lance (si besoin) le chargement asynchrone des états Notion PA / BAL.
+
+        Le chargement s'exécute dans un QThread dédié : QgsBlockingNetworkRequest
+        n'est jamais appelé sur le thread GUI, qui reste réactif. Le résultat
+        (2 dicts en mémoire) est mis en cache et réutilisé par toutes les
+        listes — un seul aller-retour réseau par base tant qu'aucun
+        rafraîchissement n'est demandé.
 
         En cas d'échec (jeton absent, réseau, etc.), bascule proprement en
-        mode dégradé : colonne et filtre État Notion masqués, message discret.
+        mode dégradé : colonnes et filtres État Notion masqués, message discret.
         """
+        if self._notion_thread is not None:
+            return  # un chargement est déjà en cours, on ne le double pas
         if self._notion_loaded and not force:
             return
 
         token = self._notion_token()
         self._notion_loaded = True
-        self._notion_pa_map = None
-        self._notion_bal_map = None
-        msg_pa = msg_bal = ''
 
         if not token:
-            msg_pa = msg_bal = 'jeton Notion non configuré'
-        else:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            try:
-                try:
-                    self._notion_pa_map = fetch_database_states(
-                        NOTION_DB_PA, token, 'id_epa')
-                except NotionClientError as exc:
-                    msg_pa = str(exc)
+            self._notion_pa_map = None
+            self._notion_bal_map = None
+            self._notion_msg_pa = self._notion_msg_bal = 'jeton Notion non configuré'
+            self._refresh_all_notion()
+            return
 
-                try:
-                    self._notion_bal_map = fetch_database_states(
-                        NOTION_DB_BAL, token, 'id_bal')
-                except NotionClientError as exc:
-                    msg_bal = str(exc)
-            finally:
-                QApplication.restoreOverrideCursor()
+        self.lbl_status.setText('Notion : chargement en cours…')
 
-        self._apply_notion_visibility(self.tbl_epa, self._notion_col_epa,
-                                       self.cmb_etat_epa, self.lbl_notion_epa,
-                                       self._notion_pa_map, msg_pa)
-        self._apply_notion_visibility(self.tbl_bal_ext, self._notion_col_bal_ext,
-                                       self.cmb_etat_bal_ext, self.lbl_notion_bal_ext,
-                                       self._notion_bal_map, msg_bal)
+        thread = QThread(self)
+        worker = NotionFetchWorker(token)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_notion_fetch_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_notion_thread_finished)
 
-        if self.tbl_epa.rowCount():
-            self._fill_notion_column(self.tbl_epa, self._notion_col_epa,
-                                      0, self._notion_pa_map)
-            self._populate_etat_filter(self.cmb_etat_epa, self.tbl_epa, self._notion_col_epa)
-        if self.tbl_bal_ext.rowCount():
-            self._fill_notion_column(self.tbl_bal_ext, self._notion_col_bal_ext,
-                                      0, self._notion_bal_map)
-            self._populate_etat_filter(self.cmb_etat_bal_ext, self.tbl_bal_ext,
-                                        self._notion_col_bal_ext)
+        self._notion_thread = thread
+        self._notion_worker = worker
+        thread.start()
+
+    def _on_notion_fetch_finished(self, pa_map, bal_map, msg_pa, msg_bal):
+        """Slot GUI appelé (signal Qt) à la fin du chargement en arrière-plan."""
+        self._notion_pa_map = pa_map
+        self._notion_bal_map = bal_map
+        self._notion_msg_pa = msg_pa
+        self._notion_msg_bal = msg_bal
+        self._refresh_all_notion()
+
+    def _on_notion_thread_finished(self):
+        self._notion_thread = None
+        self._notion_worker = None
+
+    def _refresh_all_notion(self):
+        """Rafraîchit la colonne État Notion de tous les tableaux enregistrés
+        à partir du cache mémoire (aucun appel réseau ici), puis le statut."""
+        tables = {}
+        for reg in self._notion_registry:
+            tables[id(reg['tbl'])] = reg['tbl']
+        for tbl in tables.values():
+            self._refresh_notion_for_table(tbl)
 
         parts = []
         if self._notion_pa_map is not None:
@@ -688,7 +731,70 @@ class QDRIPDialog(QDialog):
         if parts:
             self.lbl_status.setText('Notion : ' + ', '.join(parts) + ' chargés.')
         else:
-            self.lbl_status.setText('Notion indisponible : ' + (msg_pa or msg_bal or 'erreur inconnue'))
+            msg = self._notion_msg_pa or self._notion_msg_bal or 'erreur inconnue'
+            self.lbl_status.setText('Notion indisponible : ' + msg)
+
+    def _refresh_notion_for_table(self, tbl):
+        """Réapplique la colonne État Notion d'un tableau précis (lookup dict
+        O(1) par ligne depuis le cache mémoire, aucun appel réseau)."""
+        for reg in self._notion_registry:
+            if reg['tbl'] is not tbl:
+                continue
+            mapping = self._notion_pa_map if reg['kind'] == 'pa' else self._notion_bal_map
+            msg = self._notion_msg_pa if reg['kind'] == 'pa' else self._notion_msg_bal
+            self._apply_notion_visibility(tbl, reg['col'], reg['combo'], reg['lbl'],
+                                           mapping, msg)
+            if mapping is not None and tbl.rowCount():
+                self._fill_notion_column(tbl, reg['col'], reg['id_col'], mapping)
+                self._populate_etat_filter(reg['combo'], tbl, reg['col'])
+
+    def _add_notion_column(self, tbl, id_col, kind, sh_layout, ab_widget, refilter,
+                            suffix=''):
+        """Ajoute le support 'État Notion' à un tableau déjà construit.
+
+        Ajoute une colonne masquée (remplie par lookup O(1) depuis le cache
+        mémoire), un filtre déroulant dans la barre de recherche (sh_layout),
+        un bouton "Ouvrir dans Notion" dans la barre d'actions (ab_widget) et
+        un message discret de dégradation. Le tableau est ensuite enregistré
+        dans self._notion_registry pour être pris en charge par les méthodes
+        de rafraîchissement centralisées.
+
+        id_col : index de la colonne du tableau contenant l'identifiant à
+                 utiliser pour le lookup (id_epa pour kind='pa', id_bal pour
+                 kind='bal'). refilter : callable sans argument réappliquant
+                 le filtre courant du tableau (texte + état Notion).
+        """
+        suffix_lbl = f' {suffix}' if suffix else ''
+        col = tbl.columnCount()
+        tbl.insertColumn(col)
+        tbl.setHorizontalHeaderItem(col, QTableWidgetItem(f'État Notion{suffix_lbl}'))
+        tbl.setColumnHidden(col, True)
+
+        combo = QComboBox()
+        combo.addItem('Tous')
+        combo.setVisible(False)
+        combo.setEnabled(False)
+        combo.setToolTip(f'Filtrer par état Notion{suffix_lbl}')
+        combo.currentIndexChanged.connect(lambda _i: refilter())
+        sh_layout.addWidget(combo)
+
+        lbl = QLabel()
+        lbl.setStyleSheet('color: #999; font-size: 11px;')
+        lbl.setVisible(False)
+        sh_layout.addWidget(lbl)
+
+        btn = QPushButton(f'🔗  Notion{suffix_lbl}')
+        btn.setToolTip('Ouvrir la page Notion de la ligne sélectionnée')
+        btn.setEnabled(False)
+        btn.clicked.connect(lambda: self._open_notion_url(tbl, col))
+        tbl.itemSelectionChanged.connect(lambda: self._update_notion_open_btn(tbl, col, btn))
+        ab_widget.layout().addWidget(btn)
+
+        self._notion_registry.append({
+            'tbl': tbl, 'id_col': id_col, 'col': col, 'kind': kind,
+            'combo': combo, 'lbl': lbl,
+        })
+        return col
 
     @staticmethod
     def _apply_notion_visibility(tbl, col, combo, lbl, mapping, message):
@@ -884,7 +990,8 @@ class QDRIPDialog(QDialog):
         sh.addWidget(QLabel('Recherche :'))
         self.le_srch_chev = QLineEdit()
         self.le_srch_chev.setPlaceholderText('Filtrer les résultats…')
-        self.le_srch_chev.textChanged.connect(lambda t: self._filter_table(self.tbl_chev, t))
+        self.le_srch_chev.textChanged.connect(
+            lambda t: self._filter_table_multi(self.tbl_chev, t))
         sh.addWidget(self.le_srch_chev, 1)
         self.lbl_cnt_chev = QLabel('—')
         sh.addWidget(self.lbl_cnt_chev)
@@ -912,6 +1019,9 @@ class QDRIPDialog(QDialog):
         btn_shp_chev.setToolTip('Exporter les entités visibles en Shapefile')
         btn_shp_chev.clicked.connect(lambda: self._export_shp(self.tbl_chev, 'chevauchements'))
         ab.layout().addWidget(btn_shp_chev)
+        self._add_notion_column(
+            self.tbl_chev, id_col=1, kind='pa', sh_layout=sh, ab_widget=ab,
+            refilter=lambda: self._filter_table_multi(self.tbl_chev, self.le_srch_chev.text()))
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -972,7 +1082,8 @@ class QDRIPDialog(QDialog):
         sh.addWidget(QLabel('Recherche :'))
         self.le_srch_doub = QLineEdit()
         self.le_srch_doub.setPlaceholderText('Filtrer…')
-        self.le_srch_doub.textChanged.connect(lambda t: self._filter_table(self.tbl_doub, t))
+        self.le_srch_doub.textChanged.connect(
+            lambda t: self._filter_table_multi(self.tbl_doub, t))
         sh.addWidget(self.le_srch_doub, 1)
         self.lbl_cnt_doub = QLabel('—')
         sh.addWidget(self.lbl_cnt_doub)
@@ -1000,6 +1111,11 @@ class QDRIPDialog(QDialog):
         btn_shp_doub.setToolTip('Exporter les entités visibles en Shapefile')
         btn_shp_doub.clicked.connect(lambda: self._export_shp(self.tbl_doub, 'doublons', include_col4_fid=True))
         ab.layout().addWidget(btn_shp_doub)
+        doub_refilter = lambda: self._filter_table_multi(self.tbl_doub, self.le_srch_doub.text())
+        self._add_notion_column(self.tbl_doub, id_col=1, kind='pa', sh_layout=sh,
+                                 ab_widget=ab, refilter=doub_refilter, suffix='(1)')
+        self._add_notion_column(self.tbl_doub, id_col=5, kind='pa', sh_layout=sh,
+                                 ab_widget=ab, refilter=doub_refilter, suffix='(2)')
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -1049,7 +1165,8 @@ class QDRIPDialog(QDialog):
         sh.addWidget(QLabel('Recherche :'))
         self.le_srch_parc = QLineEdit()
         self.le_srch_parc.setPlaceholderText('Filtrer…')
-        self.le_srch_parc.textChanged.connect(lambda t: self._filter_table(self.tbl_parc, t))
+        self.le_srch_parc.textChanged.connect(
+            lambda t: self._filter_table_multi(self.tbl_parc, t))
         sh.addWidget(self.le_srch_parc, 1)
         self.lbl_cnt_parc = QLabel('—')
         sh.addWidget(self.lbl_cnt_parc)
@@ -1074,6 +1191,9 @@ class QDRIPDialog(QDialog):
         btn_shp_parc.setToolTip('Exporter les entités visibles en Shapefile')
         btn_shp_parc.clicked.connect(lambda: self._export_shp(self.tbl_parc, 'parcours_longs'))
         ab.layout().addWidget(btn_shp_parc)
+        self._add_notion_column(
+            self.tbl_parc, id_col=2, kind='pa', sh_layout=sh, ab_widget=ab,
+            refilter=lambda: self._filter_table_multi(self.tbl_parc, self.le_srch_parc.text()))
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -1227,6 +1347,10 @@ class QDRIPDialog(QDialog):
         btn_shp_bal.setToolTip('Exporter les entités visibles en Shapefile')
         btn_shp_bal.clicked.connect(lambda: self._export_shp(self.tbl_bal, 'bal_eloignees'))
         ab.layout().addWidget(btn_shp_bal)
+        self._add_notion_column(self.tbl_bal, id_col=0, kind='bal', sh_layout=sh,
+                                 ab_widget=ab, refilter=self._filter_bal_table, suffix='BAL')
+        self._add_notion_column(self.tbl_bal, id_col=6, kind='pa', sh_layout=sh,
+                                 ab_widget=ab, refilter=self._filter_bal_table, suffix='PA')
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -1384,6 +1508,7 @@ class QDRIPDialog(QDialog):
         self.lbl_cnt_chev.setText(f'{n} conflit(s)')
         self.lbl_status.setText(
             f'Chevauchements : {n} conflit(s) sur {len(c0_feats)} entités C0.')
+        self._refresh_notion_for_table(self.tbl_chev)
         self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1522,6 +1647,7 @@ class QDRIPDialog(QDialog):
         self.lbl_cnt_doub.setText(f'{n} doublon(s)')
         self.lbl_status.setText(
             f'Doublons : {n} paire(s) sur {len(feats)} entités.')
+        self._refresh_notion_for_table(self.tbl_doub)
         self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1590,6 +1716,7 @@ class QDRIPDialog(QDialog):
         n = len(feats)
         self.lbl_cnt_parc.setText(f'{n} parcours')
         self.lbl_status.setText(f'Parcours chargés : {n} (top {top_n}).')
+        self._refresh_notion_for_table(self.tbl_parc)
         self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1819,6 +1946,7 @@ class QDRIPDialog(QDialog):
             + (f' — rayon {int(radius)} m' if use_rayon else f' sur {n_total} analysées')
             + (f', dist. ≥ {int(dist_min)} m' if use_flt_dist else '')
             + '.')
+        self._refresh_notion_for_table(self.tbl_bal)
         self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1951,7 +2079,8 @@ class QDRIPDialog(QDialog):
                 type_ok = sel_type == (cell.text() if cell else '')
             else:
                 type_ok = True
-            self.tbl_bal.setRowHidden(row, not (text_ok and type_ok))
+            etat_ok = self._notion_etat_ok(self.tbl_bal, row)
+            self.tbl_bal.setRowHidden(row, not (text_ok and type_ok and etat_ok))
 
     def _clear_selection(self):
         for lyr in QgsProject.instance().mapLayers().values():
@@ -2378,7 +2507,7 @@ class QDRIPDialog(QDialog):
         self.le_srch_pa = QLineEdit()
         self.le_srch_pa.setPlaceholderText('Filtrer…')
         self.le_srch_pa.textChanged.connect(
-            lambda txt: self._filter_table(self.tbl_pa, txt))
+            lambda txt: self._filter_table_multi(self.tbl_pa, txt))
         sh.addWidget(self.le_srch_pa, 1)
         self.lbl_cnt_pa = QLabel('—')
         sh.addWidget(self.lbl_cnt_pa)
@@ -2407,6 +2536,11 @@ class QDRIPDialog(QDialog):
         btn_shp_pa.clicked.connect(
             lambda: self._export_shp(self.tbl_pa, 'zapa_sans_infra'))
         ab.layout().addWidget(btn_shp_pa)
+        # NB : "ID ZAPA / PA" est id_metier (ZAPA) / id_pa (infra), pas garanti
+        # identique à id_epa (titre Notion) ; lookup best-effort, vide si pas de match.
+        self._add_notion_column(
+            self.tbl_pa, id_col=1, kind='pa', sh_layout=sh, ab_widget=ab,
+            refilter=lambda: self._filter_table_multi(self.tbl_pa, self.le_srch_pa.text()))
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -2736,6 +2870,7 @@ class QDRIPDialog(QDialog):
         self.lbl_status.setText(
             f'PA sans infra : {n_sans} ZAPA sans infra sur {n_total} ZAPA avec BAL analysées.'
             + (f' {ignored_empty_zapa} ZAPA sans BAL ignorées.' if ignored_empty_zapa else ''))
+        self._refresh_notion_for_table(self.tbl_pa)
         self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -2898,6 +3033,10 @@ class QDRIPDialog(QDialog):
         notion_bar.addWidget(btn_notion_epa)
         notion_bar.addStretch()
         rv.addLayout(notion_bar)
+        self._notion_registry.append({
+            'tbl': self.tbl_epa, 'id_col': 0, 'col': self._notion_col_epa,
+            'kind': 'pa', 'combo': self.cmb_etat_epa, 'lbl': self.lbl_notion_epa,
+        })
 
         h.addWidget(res, 1)
         return w
@@ -3001,6 +3140,10 @@ class QDRIPDialog(QDialog):
         notion_bar.addWidget(btn_notion_bal)
         notion_bar.addStretch()
         rv.addLayout(notion_bar)
+        self._notion_registry.append({
+            'tbl': self.tbl_bal_ext, 'id_col': 0, 'col': self._notion_col_bal_ext,
+            'kind': 'bal', 'combo': self.cmb_etat_bal_ext, 'lbl': self.lbl_notion_bal_ext,
+        })
 
         h.addWidget(res, 1)
         return w
@@ -3085,8 +3228,7 @@ class QDRIPDialog(QDialog):
         self.tbl_epa.setSortingEnabled(True)
 
         self._ensure_notion_loaded()
-        self._fill_notion_column(self.tbl_epa, self._notion_col_epa, 0, self._notion_pa_map)
-        self._populate_etat_filter(self.cmb_etat_epa, self.tbl_epa, self._notion_col_epa)
+        self._refresh_notion_for_table(self.tbl_epa)
 
         n     = len(results)
         n_pm  = len(self._pm_set)
@@ -3195,10 +3337,7 @@ class QDRIPDialog(QDialog):
         self.tbl_bal_ext.setSortingEnabled(True)
 
         self._ensure_notion_loaded()
-        self._fill_notion_column(self.tbl_bal_ext, self._notion_col_bal_ext, 0,
-                                  self._notion_bal_map)
-        self._populate_etat_filter(self.cmb_etat_bal_ext, self.tbl_bal_ext,
-                                    self._notion_col_bal_ext)
+        self._refresh_notion_for_table(self.tbl_bal_ext)
 
         n = self.tbl_bal_ext.rowCount()
         n_pm = len(n_pm_hit)
@@ -3306,7 +3445,7 @@ class QDRIPDialog(QDialog):
     def _on_rapport_filter(self, text):
         if not hasattr(self, 'tbl_rapport'):
             return
-        self._filter_table(self.tbl_rapport, text)
+        self._filter_table_multi(self.tbl_rapport, text)
         self._update_rapport_count()
 
     def _update_rapport_count(self):
@@ -3427,7 +3566,7 @@ class QDRIPDialog(QDialog):
         self.tbl_rapport.setSortingEnabled(True)
 
         if self.le_srch_rapport.text():
-            self._filter_table(self.tbl_rapport, self.le_srch_rapport.text())
+            self._filter_table_multi(self.tbl_rapport, self.le_srch_rapport.text())
         self._update_rapport_count()
 
         now = datetime.datetime.now().strftime('%H:%M:%S')

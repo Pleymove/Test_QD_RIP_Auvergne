@@ -30,6 +30,15 @@ Plugin de contrôle qualité des données RIP Auvergne.
 
 ## Changelog
 
+### Version 1.4.2
+- État Notion sur toutes les listes PA/BAL + chargement asynchrone non bloquant (fini les ralentissements)
+- Colonne **État Notion** (pastille couleur), filtre déroulant et bouton **🔗 Ouvrir dans Notion** désormais disponibles sur **Chevauchements C0 / Existant**, **Doublons Infra** (PA 1 et PA 2), **Parcours les plus longs**, **BAL éloignées infra** (BAL et PA infra) et **PA sans infra**, en plus des tableaux EPA/BAL de l'onglet Extractions
+- Le chargement des états Notion (PA + BAL) ne s'effectue plus qu'**une seule fois** par ouverture (ou rafraîchissement explicite), dans un `QThread` dédié : `QgsBlockingNetworkRequest` n'est plus jamais appelé sur le thread GUI, qui reste réactif pendant l'appel réseau
+- Les deux dictionnaires d'états (PA par `id_epa`, BAL par `id_bal`) sont mis en cache en mémoire et réutilisés par toutes les listes (simple lookup, sans nouvel appel réseau par tableau ou par ligne)
+- Nouvelle architecture interne factorisée (`_notion_registry`) : ajouter le support État Notion à un tableau ne demande plus de logique dupliquée
+- Pour les tableaux qui n'exposent pas directement `id_epa` (Chevauchements, Doublons, Parcours, PA sans infra), la jointure est faite au mieux sur l'identifiant PA disponible dans la colonne (`id_pa`/`id_metier`) ; en l'absence de correspondance exacte avec le titre Notion (`id_epa`), la cellule reste simplement vide (aucun mauvais appariement possible). Seuls les tableaux de l'onglet **Extractions** (EPA et BAL) garantissent une jointure exacte sur `id_epa`/`id_bal`
+- Fermeture propre du thread de chargement Notion à la fermeture du plugin (plus d'avertissement « QThread: Destroyed while thread is still running »)
+
 ### Version 1.4.1
 - Identifiants des bases Notion (« Suivi PA » et « Suivi BAL ») désormais codés en dur dans le plugin : ils ne sont plus demandés à l'utilisateur
 - Le dialogue **⚙️ Réglages Notion** ne contient plus que le champ **Jeton Notion** (stocké uniquement en local via `QSettings`, jamais dans le code, en mode masqué)
