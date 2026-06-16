@@ -35,6 +35,7 @@ from qgis.utils import iface
 from .pm_perimeter import DEFAULT_PM_CODES
 from .notion_client import (
     fetch_database_states, notion_color_to_qcolor, NotionClientError,
+    NOTION_DB_PA, NOTION_DB_BAL,
 )
 
 # Réglages QSettings pour l'intégration Notion (jeton JAMAIS stocké dans le code)
@@ -577,22 +578,24 @@ class QDRIPDialog(QDialog):
     # Intégration Notion (État PA / BAL)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _notion_settings(self):
-        """Lit les réglages Notion depuis QSettings (jeton jamais codé en dur)."""
+    def _notion_token(self):
+        """Lit le jeton Notion depuis QSettings (jamais codé en dur).
+
+        Les identifiants des bases (NOTION_DB_PA / NOTION_DB_BAL) ne sont pas
+        des secrets : ils sont codés en dur dans notion_client.py.
+        """
         settings = QSettings()
         settings.beginGroup(NOTION_SETTINGS_GROUP)
         token = settings.value('token', '', type=str)
-        db_pa = settings.value('db_id_pa', '', type=str)
-        db_bal = settings.value('db_id_bal', '', type=str)
         settings.endGroup()
-        return token, db_pa, db_bal
+        return token
 
     def _open_notion_settings(self):
-        token, db_pa, db_bal = self._notion_settings()
+        token = self._notion_token()
 
         dlg = QDialog(self)
         dlg.setWindowTitle('Réglages Notion')
-        dlg.resize(440, 220)
+        dlg.resize(440, 160)
         v = QVBoxLayout(dlg)
         frm = QFormLayout()
 
@@ -601,18 +604,11 @@ class QDRIPDialog(QDialog):
         le_token.setPlaceholderText('secret_xxx… (jeton d\'intégration Notion)')
         frm.addRow('Jeton Notion :', le_token)
 
-        le_db_pa = QLineEdit(db_pa)
-        le_db_pa.setPlaceholderText('Identifiant de la base Notion « Suivi PA »')
-        frm.addRow('ID base PA :', le_db_pa)
-
-        le_db_bal = QLineEdit(db_bal)
-        le_db_bal.setPlaceholderText('Identifiant de la base Notion « Suivi BAL »')
-        frm.addRow('ID base BAL :', le_db_bal)
-
         v.addLayout(frm)
         info = QLabel(
             '<small><i>Le jeton est stocké uniquement en local sur ce poste (QSettings).\n'
-            'Il n\'est jamais écrit dans le code ni dans un fichier versionné.</i></small>'
+            'Il n\'est jamais écrit dans le code ni dans un fichier versionné.\n'
+            'Les bases PA / BAL sont déjà configurées dans le plugin.</i></small>'
         )
         info.setWordWrap(True)
         v.addWidget(info)
@@ -627,8 +623,9 @@ class QDRIPDialog(QDialog):
             settings = QSettings()
             settings.beginGroup(NOTION_SETTINGS_GROUP)
             settings.setValue('token', le_token.text().strip())
-            settings.setValue('db_id_pa', le_db_pa.text().strip())
-            settings.setValue('db_id_bal', le_db_bal.text().strip())
+            # Nettoyage des anciennes clés d'ID de base (désormais codées en dur)
+            settings.remove('db_id_pa')
+            settings.remove('db_id_bal')
             settings.endGroup()
             self._ensure_notion_loaded(force=True)
 
@@ -641,7 +638,7 @@ class QDRIPDialog(QDialog):
         if self._notion_loaded and not force:
             return
 
-        token, db_pa, db_bal = self._notion_settings()
+        token = self._notion_token()
         self._notion_loaded = True
         self._notion_pa_map = None
         self._notion_bal_map = None
@@ -652,21 +649,17 @@ class QDRIPDialog(QDialog):
         else:
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
-                if db_pa:
-                    try:
-                        self._notion_pa_map = fetch_database_states(db_pa, token, 'id_epa')
-                    except NotionClientError as exc:
-                        msg_pa = str(exc)
-                else:
-                    msg_pa = 'ID base PA non configuré'
+                try:
+                    self._notion_pa_map = fetch_database_states(
+                        NOTION_DB_PA, token, 'id_epa')
+                except NotionClientError as exc:
+                    msg_pa = str(exc)
 
-                if db_bal:
-                    try:
-                        self._notion_bal_map = fetch_database_states(db_bal, token, 'id_bal')
-                    except NotionClientError as exc:
-                        msg_bal = str(exc)
-                else:
-                    msg_bal = 'ID base BAL non configuré'
+                try:
+                    self._notion_bal_map = fetch_database_states(
+                        NOTION_DB_BAL, token, 'id_bal')
+                except NotionClientError as exc:
+                    msg_bal = str(exc)
             finally:
                 QApplication.restoreOverrideCursor()
 

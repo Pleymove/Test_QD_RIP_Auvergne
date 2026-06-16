@@ -30,6 +30,11 @@ Plugin de contrôle qualité des données RIP Auvergne.
 
 ## Changelog
 
+### Version 1.4.1
+- Identifiants des bases Notion (« Suivi PA » et « Suivi BAL ») désormais codés en dur dans le plugin : ils ne sont plus demandés à l'utilisateur
+- Le dialogue **⚙️ Réglages Notion** ne contient plus que le champ **Jeton Notion** (stocké uniquement en local via `QSettings`, jamais dans le code, en mode masqué)
+- Nettoyage automatique des anciennes clés `QSettings` d'identifiants de bases devenues inutiles
+
 ### Version 1.4.0
 - Intégration **Notion** : affichage de l'état métier (« État ») des PA et BAL dans l'onglet **📤 Extractions**
 - Nouvelle colonne **État Notion** (avec pastille de couleur reprenant la couleur du statut Notion) sur les tableaux EPA/PA et BAL extraits
