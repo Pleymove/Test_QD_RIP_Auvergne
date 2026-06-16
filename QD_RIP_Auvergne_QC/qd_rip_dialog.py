@@ -22,8 +22,8 @@ from qgis.PyQt.QtWidgets import (
     QSplitter, QPlainTextEdit, QDialogButtonBox, QTextBrowser, QComboBox,
     QStackedWidget,
 )
-from qgis.PyQt.QtCore import Qt, QUrl
-from qgis.PyQt.QtGui import QColor, QBrush, QFont, QDesktopServices
+from qgis.PyQt.QtCore import Qt, QUrl, QSettings
+from qgis.PyQt.QtGui import QColor, QBrush, QFont, QDesktopServices, QIcon, QPixmap, QPainter
 
 from qgis.core import (
     QgsProject, QgsSpatialIndex, QgsFeatureRequest, QgsRectangle,
@@ -33,6 +33,12 @@ from qgis.gui import QgsMapLayerComboBox
 from qgis.utils import iface
 
 from .pm_perimeter import DEFAULT_PM_CODES
+from .notion_client import (
+    fetch_database_states, notion_color_to_qcolor, NotionClientError,
+)
+
+# Réglages QSettings pour l'intégration Notion (jeton JAMAIS stocké dans le code)
+NOTION_SETTINGS_GROUP = 'QD_RIP_Auvergne/notion'
 
 # Resolution du filtre de couche, compatible QGIS 3.16 -> 4.x
 try:
@@ -110,6 +116,11 @@ class QDRIPDialog(QDialog):
         self._pm_codes = list(DEFAULT_PM_CODES)
         self._pm_set = set(self._pm_codes)
         self._pa_ignored_empty_zapa = 0
+
+        # ── État Notion (PA / BAL) ──────────────────────────────────────────
+        self._notion_pa_map = None      # dict id_epa -> {etat, couleur, url} ou None
+        self._notion_bal_map = None     # dict id_bal -> {etat, couleur, url} ou None
+        self._notion_loaded = False     # True dès qu'une tentative de chargement a eu lieu
         self.setWindowTitle('QD RIP Auvergne — Contrôle Qualité')
         self.setMinimumSize(980, 700)
         self.resize(1200, 800)
@@ -457,6 +468,19 @@ class QDRIPDialog(QDialog):
         bar = QHBoxLayout()
         self.lbl_status = QLabel('Prêt.')
         bar.addWidget(self.lbl_status, 1)
+        btn_notion_settings = QPushButton('⚙️  Réglages Notion')
+        btn_notion_settings.setToolTip(
+            'Configurer le jeton Notion et les identifiants des bases de suivi PA / BAL.\n'
+            'Le jeton est stocké uniquement en local (QSettings), jamais dans le code.'
+        )
+        btn_notion_settings.clicked.connect(self._open_notion_settings)
+        bar.addWidget(btn_notion_settings)
+        btn_notion_refresh = QPushButton('🔄  Rafraîchir Notion')
+        btn_notion_refresh.setToolTip(
+            'Recharger les états Notion des bases PA et BAL (mis en cache après le premier appel).'
+        )
+        btn_notion_refresh.clicked.connect(lambda: self._ensure_notion_loaded(force=True))
+        bar.addWidget(btn_notion_refresh)
         btn_report = QPushButton('📊  Générer Rapport')
         btn_report.setToolTip(
             'Générer un rapport HTML de synthèse avec les résultats\n'
@@ -548,6 +572,227 @@ class QDRIPDialog(QDialog):
         h.addWidget(btn_csv)
 
         return w, btn_zoom, btn_sel, btn_csv
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Intégration Notion (État PA / BAL)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _notion_settings(self):
+        """Lit les réglages Notion depuis QSettings (jeton jamais codé en dur)."""
+        settings = QSettings()
+        settings.beginGroup(NOTION_SETTINGS_GROUP)
+        token = settings.value('token', '', type=str)
+        db_pa = settings.value('db_id_pa', '', type=str)
+        db_bal = settings.value('db_id_bal', '', type=str)
+        settings.endGroup()
+        return token, db_pa, db_bal
+
+    def _open_notion_settings(self):
+        token, db_pa, db_bal = self._notion_settings()
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Réglages Notion')
+        dlg.resize(440, 220)
+        v = QVBoxLayout(dlg)
+        frm = QFormLayout()
+
+        le_token = QLineEdit(token)
+        le_token.setEchoMode(QLineEdit.EchoMode.Password)
+        le_token.setPlaceholderText('secret_xxx… (jeton d\'intégration Notion)')
+        frm.addRow('Jeton Notion :', le_token)
+
+        le_db_pa = QLineEdit(db_pa)
+        le_db_pa.setPlaceholderText('Identifiant de la base Notion « Suivi PA »')
+        frm.addRow('ID base PA :', le_db_pa)
+
+        le_db_bal = QLineEdit(db_bal)
+        le_db_bal.setPlaceholderText('Identifiant de la base Notion « Suivi BAL »')
+        frm.addRow('ID base BAL :', le_db_bal)
+
+        v.addLayout(frm)
+        info = QLabel(
+            '<small><i>Le jeton est stocké uniquement en local sur ce poste (QSettings).\n'
+            'Il n\'est jamais écrit dans le code ni dans un fichier versionné.</i></small>'
+        )
+        info.setWordWrap(True)
+        v.addWidget(info)
+
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            settings = QSettings()
+            settings.beginGroup(NOTION_SETTINGS_GROUP)
+            settings.setValue('token', le_token.text().strip())
+            settings.setValue('db_id_pa', le_db_pa.text().strip())
+            settings.setValue('db_id_bal', le_db_bal.text().strip())
+            settings.endGroup()
+            self._ensure_notion_loaded(force=True)
+
+    def _ensure_notion_loaded(self, force=False):
+        """Charge (ou recharge) les états Notion PA / BAL, avec mise en cache.
+
+        En cas d'échec (jeton absent, réseau, etc.), bascule proprement en
+        mode dégradé : colonne et filtre État Notion masqués, message discret.
+        """
+        if self._notion_loaded and not force:
+            return
+
+        token, db_pa, db_bal = self._notion_settings()
+        self._notion_loaded = True
+        self._notion_pa_map = None
+        self._notion_bal_map = None
+        msg_pa = msg_bal = ''
+
+        if not token:
+            msg_pa = msg_bal = 'jeton Notion non configuré'
+        else:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                if db_pa:
+                    try:
+                        self._notion_pa_map = fetch_database_states(db_pa, token, 'id_epa')
+                    except NotionClientError as exc:
+                        msg_pa = str(exc)
+                else:
+                    msg_pa = 'ID base PA non configuré'
+
+                if db_bal:
+                    try:
+                        self._notion_bal_map = fetch_database_states(db_bal, token, 'id_bal')
+                    except NotionClientError as exc:
+                        msg_bal = str(exc)
+                else:
+                    msg_bal = 'ID base BAL non configuré'
+            finally:
+                QApplication.restoreOverrideCursor()
+
+        self._apply_notion_visibility(self.tbl_epa, self._notion_col_epa,
+                                       self.cmb_etat_epa, self.lbl_notion_epa,
+                                       self._notion_pa_map, msg_pa)
+        self._apply_notion_visibility(self.tbl_bal_ext, self._notion_col_bal_ext,
+                                       self.cmb_etat_bal_ext, self.lbl_notion_bal_ext,
+                                       self._notion_bal_map, msg_bal)
+
+        if self.tbl_epa.rowCount():
+            self._fill_notion_column(self.tbl_epa, self._notion_col_epa,
+                                      0, self._notion_pa_map)
+            self._populate_etat_filter(self.cmb_etat_epa, self.tbl_epa, self._notion_col_epa)
+        if self.tbl_bal_ext.rowCount():
+            self._fill_notion_column(self.tbl_bal_ext, self._notion_col_bal_ext,
+                                      0, self._notion_bal_map)
+            self._populate_etat_filter(self.cmb_etat_bal_ext, self.tbl_bal_ext,
+                                        self._notion_col_bal_ext)
+
+        parts = []
+        if self._notion_pa_map is not None:
+            parts.append(f'{len(self._notion_pa_map)} états PA')
+        if self._notion_bal_map is not None:
+            parts.append(f'{len(self._notion_bal_map)} états BAL')
+        if parts:
+            self.lbl_status.setText('Notion : ' + ', '.join(parts) + ' chargés.')
+        else:
+            self.lbl_status.setText('Notion indisponible : ' + (msg_pa or msg_bal or 'erreur inconnue'))
+
+    @staticmethod
+    def _apply_notion_visibility(tbl, col, combo, lbl, mapping, message):
+        """Affiche/masque la colonne, le filtre et le message d'état Notion."""
+        available = mapping is not None
+        tbl.setColumnHidden(col, not available)
+        combo.setEnabled(available)
+        combo.setVisible(available)
+        if available:
+            lbl.setVisible(False)
+        else:
+            lbl.setText(f'⚠ État Notion indisponible ({message})' if message
+                        else '⚠ État Notion indisponible')
+            lbl.setVisible(True)
+
+    @staticmethod
+    def _notion_status_icon(color_name):
+        """Construit une petite pastille de couleur (QIcon) pour un statut Notion."""
+        color = notion_color_to_qcolor(color_name)
+        pix = QPixmap(12, 12)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setBrush(QBrush(color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(1, 1, 10, 10)
+        painter.end()
+        return QIcon(pix)
+
+    def _fill_notion_column(self, tbl, col, id_col, mapping):
+        """Remplit la colonne État Notion (col) à partir de la colonne id_col."""
+        tbl.setSortingEnabled(False)
+        for row in range(tbl.rowCount()):
+            id_item = tbl.item(row, id_col)
+            key = id_item.text().strip() if id_item else ''
+            info = mapping.get(key) if mapping else None
+            if info:
+                it = QTableWidgetItem(info.get('etat', ''))
+                it.setIcon(self._notion_status_icon(info.get('couleur', '')))
+                it.setData(Qt.ItemDataRole.UserRole + 3, info.get('url', ''))
+            else:
+                it = QTableWidgetItem('')
+            tbl.setItem(row, col, it)
+        tbl.setSortingEnabled(True)
+
+    @staticmethod
+    def _populate_etat_filter(combo, tbl, col):
+        """Remplit le filtre déroulant État Notion avec les valeurs présentes."""
+        combo.blockSignals(True)
+        current = combo.currentText()
+        combo.clear()
+        combo.addItem('Tous')
+        values = sorted({
+            tbl.item(r, col).text() for r in range(tbl.rowCount())
+            if tbl.item(r, col) and tbl.item(r, col).text()
+        })
+        combo.addItems(values)
+        idx = combo.findText(current)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    @staticmethod
+    def _filter_table_with_etat(tbl, text, etat_col, etat_combo):
+        """Filtre combiné : recherche texte (toutes colonnes) + état Notion."""
+        text = text.lower()
+        etat_value = etat_combo.currentText() if etat_combo.isVisible() else 'Tous'
+        for row in range(tbl.rowCount()):
+            text_ok = not text or any(
+                text in (tbl.item(row, c).text().lower() if tbl.item(row, c) else '')
+                for c in range(tbl.columnCount())
+            )
+            etat_ok = True
+            if etat_value and etat_value != 'Tous':
+                cell = tbl.item(row, etat_col)
+                etat_ok = bool(cell) and cell.text() == etat_value
+            tbl.setRowHidden(row, not (text_ok and etat_ok))
+
+    def _open_notion_url(self, tbl, col):
+        sel = tbl.selectedItems()
+        if not sel:
+            return
+        row = sel[0].row()
+        it = tbl.item(row, col)
+        url = it.data(Qt.ItemDataRole.UserRole + 3) if it else None
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+        else:
+            QMessageBox.information(self, 'Notion',
+                'Aucune page Notion associée à cet élément.')
+
+    def _update_notion_open_btn(self, tbl, col, btn):
+        sel = tbl.selectedItems()
+        url = ''
+        if sel:
+            it = tbl.item(sel[0].row(), col)
+            url = (it.data(Qt.ItemDataRole.UserRole + 3) if it else '') or ''
+        btn.setEnabled(bool(url))
 
     # ─────────────────────────────────────────────────────────────────────────
     # TAB 1 – Chevauchements
@@ -2609,17 +2854,33 @@ class QDRIPDialog(QDialog):
         self.le_srch_epa = QLineEdit()
         self.le_srch_epa.setPlaceholderText('Filtrer…')
         self.le_srch_epa.textChanged.connect(
-            lambda txt: self._filter_table(self.tbl_epa, txt))
+            lambda txt: self._filter_table_with_etat(
+                self.tbl_epa, txt, self._notion_col_epa, self.cmb_etat_epa))
         sh.addWidget(self.le_srch_epa, 1)
+        sh.addWidget(QLabel('État Notion :'))
+        self.cmb_etat_epa = QComboBox()
+        self.cmb_etat_epa.addItem('Tous')
+        self.cmb_etat_epa.setVisible(False)
+        self.cmb_etat_epa.currentTextChanged.connect(
+            lambda _txt: self._filter_table_with_etat(
+                self.tbl_epa, self.le_srch_epa.text(), self._notion_col_epa, self.cmb_etat_epa))
+        sh.addWidget(self.cmb_etat_epa)
         self.lbl_cnt_epa = QLabel('—')
         sh.addWidget(self.lbl_cnt_epa)
         rv.addLayout(sh)
 
-        self.tbl_epa = QTableWidget(0, 4)
+        self.lbl_notion_epa = QLabel()
+        self.lbl_notion_epa.setStyleSheet('color: #999; font-size: 11px;')
+        self.lbl_notion_epa.setVisible(False)
+        rv.addWidget(self.lbl_notion_epa)
+
+        self.tbl_epa = QTableWidget(0, 5)
+        self._notion_col_epa = 4
         self.tbl_epa.setHorizontalHeaderLabels([
-            'id_epa', 'pmz', 'Champ ID', 'Champ PMZ',
+            'id_epa', 'pmz', 'Champ ID', 'Champ PMZ', 'État Notion',
         ])
         self._style_table(self.tbl_epa)
+        self.tbl_epa.setColumnHidden(self._notion_col_epa, True)
         self.tbl_epa.doubleClicked.connect(
             lambda idx: self._zoom_row(self.tbl_epa, idx.row()))
         rv.addWidget(self.tbl_epa)
@@ -2633,6 +2894,18 @@ class QDRIPDialog(QDialog):
             shp_slot   = lambda: self._export_shp(self.tbl_epa, 'epa_perimetre_pm'),
             csv_tooltip = 'Exporter id_epa;pmz en CSV (UTF-8, séparateur ;)',
         ))
+
+        notion_bar = QHBoxLayout()
+        btn_notion_epa = QPushButton('🔗  Ouvrir dans Notion')
+        btn_notion_epa.setEnabled(False)
+        btn_notion_epa.clicked.connect(
+            lambda: self._open_notion_url(self.tbl_epa, self._notion_col_epa))
+        self.tbl_epa.itemSelectionChanged.connect(
+            lambda: self._update_notion_open_btn(self.tbl_epa, self._notion_col_epa, btn_notion_epa))
+        notion_bar.addWidget(btn_notion_epa)
+        notion_bar.addStretch()
+        rv.addLayout(notion_bar)
+
         h.addWidget(res, 1)
         return w
 
@@ -2682,17 +2955,34 @@ class QDRIPDialog(QDialog):
         self.le_srch_bal_ext = QLineEdit()
         self.le_srch_bal_ext.setPlaceholderText('Filtrer…')
         self.le_srch_bal_ext.textChanged.connect(
-            lambda txt: self._filter_table(self.tbl_bal_ext, txt))
+            lambda txt: self._filter_table_with_etat(
+                self.tbl_bal_ext, txt, self._notion_col_bal_ext, self.cmb_etat_bal_ext))
         sh.addWidget(self.le_srch_bal_ext, 1)
+        sh.addWidget(QLabel('État Notion :'))
+        self.cmb_etat_bal_ext = QComboBox()
+        self.cmb_etat_bal_ext.addItem('Tous')
+        self.cmb_etat_bal_ext.setVisible(False)
+        self.cmb_etat_bal_ext.currentTextChanged.connect(
+            lambda _txt: self._filter_table_with_etat(
+                self.tbl_bal_ext, self.le_srch_bal_ext.text(),
+                self._notion_col_bal_ext, self.cmb_etat_bal_ext))
+        sh.addWidget(self.cmb_etat_bal_ext)
         self.lbl_cnt_bal_ext = QLabel('—')
         sh.addWidget(self.lbl_cnt_bal_ext)
         rv.addLayout(sh)
 
-        self.tbl_bal_ext = QTableWidget(0, 6)
+        self.lbl_notion_bal_ext = QLabel()
+        self.lbl_notion_bal_ext.setStyleSheet('color: #999; font-size: 11px;')
+        self.lbl_notion_bal_ext.setVisible(False)
+        rv.addWidget(self.lbl_notion_bal_ext)
+
+        self.tbl_bal_ext = QTableWidget(0, 7)
+        self._notion_col_bal_ext = 6
         self.tbl_bal_ext.setHorizontalHeaderLabels([
-            'id_bal', 'nb_prises', 'pa', 'pmz', 'Champ ID', 'Champ PMZ',
+            'id_bal', 'nb_prises', 'pa', 'pmz', 'Champ ID', 'Champ PMZ', 'État Notion',
         ])
         self._style_table(self.tbl_bal_ext)
+        self.tbl_bal_ext.setColumnHidden(self._notion_col_bal_ext, True)
         self.tbl_bal_ext.doubleClicked.connect(
             lambda idx: self._zoom_row(self.tbl_bal_ext, idx.row()))
         rv.addWidget(self.tbl_bal_ext)
@@ -2706,6 +2996,19 @@ class QDRIPDialog(QDialog):
             shp_slot   = lambda: self._export_shp(self.tbl_bal_ext, 'bal_perimetre_pm'),
             csv_tooltip = 'Exporter id_bal;nb_prises;pa;pmz en CSV (UTF-8, séparateur ;)',
         ))
+
+        notion_bar = QHBoxLayout()
+        btn_notion_bal = QPushButton('🔗  Ouvrir dans Notion')
+        btn_notion_bal.setEnabled(False)
+        btn_notion_bal.clicked.connect(
+            lambda: self._open_notion_url(self.tbl_bal_ext, self._notion_col_bal_ext))
+        self.tbl_bal_ext.itemSelectionChanged.connect(
+            lambda: self._update_notion_open_btn(
+                self.tbl_bal_ext, self._notion_col_bal_ext, btn_notion_bal))
+        notion_bar.addWidget(btn_notion_bal)
+        notion_bar.addStretch()
+        rv.addLayout(notion_bar)
+
         h.addWidget(res, 1)
         return w
 
@@ -2787,6 +3090,10 @@ class QDRIPDialog(QDialog):
             self.tbl_epa.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, r['fid'])
             self.tbl_epa.item(row, 0).setData(Qt.ItemDataRole.UserRole + 2, r['layer_id'])
         self.tbl_epa.setSortingEnabled(True)
+
+        self._ensure_notion_loaded()
+        self._fill_notion_column(self.tbl_epa, self._notion_col_epa, 0, self._notion_pa_map)
+        self._populate_etat_filter(self.cmb_etat_epa, self.tbl_epa, self._notion_col_epa)
 
         n     = len(results)
         n_pm  = len(self._pm_set)
@@ -2893,6 +3200,13 @@ class QDRIPDialog(QDialog):
             row_idx += 1
 
         self.tbl_bal_ext.setSortingEnabled(True)
+
+        self._ensure_notion_loaded()
+        self._fill_notion_column(self.tbl_bal_ext, self._notion_col_bal_ext, 0,
+                                  self._notion_bal_map)
+        self._populate_etat_filter(self.cmb_etat_bal_ext, self.tbl_bal_ext,
+                                    self._notion_col_bal_ext)
+
         n = self.tbl_bal_ext.rowCount()
         n_pm = len(n_pm_hit)
         self.lbl_cnt_bal_ext.setText(f'{n} BAL')
