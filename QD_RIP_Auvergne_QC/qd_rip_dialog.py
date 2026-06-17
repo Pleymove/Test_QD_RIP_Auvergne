@@ -41,17 +41,19 @@ NOTION_SETTINGS_GROUP = 'QD_RIP_Auvergne/notion'
 # Resolution du filtre de couche, compatible QGIS 3.16 -> 4.x
 try:
     from qgis.core import Qgis
-    _F_LINE  = Qgis.LayerFilter.LineLayer
-    _F_POINT = Qgis.LayerFilter.PointLayer
-    _F_POLY  = Qgis.LayerFilter.PolygonLayer
+    _F_LINE   = Qgis.LayerFilter.LineLayer
+    _F_POINT  = Qgis.LayerFilter.PointLayer
+    _F_POLY   = Qgis.LayerFilter.PolygonLayer
+    _F_VECTOR = Qgis.LayerFilter.VectorLayer
 except (ImportError, AttributeError):
     try:
         from qgis.core import QgsMapLayerProxyModel
     except ImportError:
         from qgis.gui import QgsMapLayerProxyModel
-    _F_LINE  = QgsMapLayerProxyModel.LineLayer
-    _F_POINT = QgsMapLayerProxyModel.PointLayer
-    _F_POLY  = QgsMapLayerProxyModel.PolygonLayer
+    _F_LINE   = QgsMapLayerProxyModel.LineLayer
+    _F_POINT  = QgsMapLayerProxyModel.PointLayer
+    _F_POLY   = QgsMapLayerProxyModel.PolygonLayer
+    _F_VECTOR = QgsMapLayerProxyModel.VectorLayer
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1019,9 +1021,9 @@ class QDRIPDialog(QDialog):
         btn_shp_chev.setToolTip('Exporter les entités visibles en Shapefile')
         btn_shp_chev.clicked.connect(lambda: self._export_shp(self.tbl_chev, 'chevauchements'))
         ab.layout().addWidget(btn_shp_chev)
-        self._add_notion_column(
-            self.tbl_chev, id_col=1, kind='pa', sh_layout=sh, ab_widget=ab,
-            refilter=lambda: self._filter_table_multi(self.tbl_chev, self.le_srch_chev.text()))
+        # Pas de colonne État Notion ici : chaque ligne représente une entité
+        # infra (sujet de la ligne), pas un PA ni une BAL ; "id_pa" n'est qu'un
+        # attribut secondaire référencé.
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -1111,11 +1113,9 @@ class QDRIPDialog(QDialog):
         btn_shp_doub.setToolTip('Exporter les entités visibles en Shapefile')
         btn_shp_doub.clicked.connect(lambda: self._export_shp(self.tbl_doub, 'doublons', include_col4_fid=True))
         ab.layout().addWidget(btn_shp_doub)
-        doub_refilter = lambda: self._filter_table_multi(self.tbl_doub, self.le_srch_doub.text())
-        self._add_notion_column(self.tbl_doub, id_col=1, kind='pa', sh_layout=sh,
-                                 ab_widget=ab, refilter=doub_refilter, suffix='(1)')
-        self._add_notion_column(self.tbl_doub, id_col=5, kind='pa', sh_layout=sh,
-                                 ab_widget=ab, refilter=doub_refilter, suffix='(2)')
+        # Pas de colonne État Notion ici : chaque ligne représente une paire
+        # d'entités infra (sujet de la ligne) ; "id_pa 1"/"id_pa 2" ne sont que
+        # des attributs secondaires référencés.
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -1191,9 +1191,9 @@ class QDRIPDialog(QDialog):
         btn_shp_parc.setToolTip('Exporter les entités visibles en Shapefile')
         btn_shp_parc.clicked.connect(lambda: self._export_shp(self.tbl_parc, 'parcours_longs'))
         ab.layout().addWidget(btn_shp_parc)
-        self._add_notion_column(
-            self.tbl_parc, id_col=2, kind='pa', sh_layout=sh, ab_widget=ab,
-            refilter=lambda: self._filter_table_multi(self.tbl_parc, self.le_srch_parc.text()))
+        # Pas de colonne État Notion ici : chaque ligne représente une entité
+        # infra (sujet de la ligne), pas un PA ; "id_pa" n'est qu'un attribut
+        # secondaire référencé.
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -1347,10 +1347,12 @@ class QDRIPDialog(QDialog):
         btn_shp_bal.setToolTip('Exporter les entités visibles en Shapefile')
         btn_shp_bal.clicked.connect(lambda: self._export_shp(self.tbl_bal, 'bal_eloignees'))
         ab.layout().addWidget(btn_shp_bal)
+        # Une seule colonne État Notion : chaque ligne représente une BAL
+        # (sujet de la ligne) ; "id_pa infra" n'est qu'un attribut secondaire
+        # référencé (PA de l'infra la plus proche) et ne doit pas générer sa
+        # propre colonne d'état.
         self._add_notion_column(self.tbl_bal, id_col=0, kind='bal', sh_layout=sh,
-                                 ab_widget=ab, refilter=self._filter_bal_table, suffix='BAL')
-        self._add_notion_column(self.tbl_bal, id_col=6, kind='pa', sh_layout=sh,
-                                 ab_widget=ab, refilter=self._filter_bal_table, suffix='PA')
+                                 ab_widget=ab, refilter=self._filter_bal_table)
         rv.addWidget(ab)
 
         h.addWidget(res, 1)
@@ -1508,7 +1510,6 @@ class QDRIPDialog(QDialog):
         self.lbl_cnt_chev.setText(f'{n} conflit(s)')
         self.lbl_status.setText(
             f'Chevauchements : {n} conflit(s) sur {len(c0_feats)} entités C0.')
-        self._refresh_notion_for_table(self.tbl_chev)
         self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1647,7 +1648,6 @@ class QDRIPDialog(QDialog):
         self.lbl_cnt_doub.setText(f'{n} doublon(s)')
         self.lbl_status.setText(
             f'Doublons : {n} paire(s) sur {len(feats)} entités.')
-        self._refresh_notion_for_table(self.tbl_doub)
         self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1716,7 +1716,6 @@ class QDRIPDialog(QDialog):
         n = len(feats)
         self.lbl_cnt_parc.setText(f'{n} parcours')
         self.lbl_status.setText(f'Parcours chargés : {n} (top {top_n}).')
-        self._refresh_notion_for_table(self.tbl_parc)
         self._refresh_rapport_tab()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -2087,15 +2086,12 @@ class QDRIPDialog(QDialog):
             if hasattr(lyr, 'removeSelection'):
                 lyr.removeSelection()
 
-    def _export_xlsx(self, tbl, name):
-        """Export the visible table rows to a real Excel file (.xlsx) as a table."""
-        path, _ = QFileDialog.getSaveFileName(
-            self, 'Exporter Excel', f'{name}.xlsx', 'Classeur Excel (*.xlsx)')
-        if not path:
-            return
-        if not path.lower().endswith('.xlsx'):
-            path += '.xlsx'
+    @staticmethod
+    def _table_visible_headers_and_rows(tbl):
+        """Retourne (headers, rows) pour les lignes visibles d'un QTableWidget.
 
+        Helper générique partagé par les exports CSV et Excel.
+        """
         headers = [
             (tbl.horizontalHeaderItem(c).text()
              if tbl.horizontalHeaderItem(c) else f'Col{c}')
@@ -2109,6 +2105,18 @@ class QDRIPDialog(QDialog):
                 (tbl.item(row, c).text() if tbl.item(row, c) else '')
                 for c in range(tbl.columnCount())
             ])
+        return headers, rows
+
+    def _export_xlsx(self, tbl, name):
+        """Export the visible table rows to a real Excel file (.xlsx) as a table."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Exporter Excel', f'{name}.xlsx', 'Classeur Excel (*.xlsx)')
+        if not path:
+            return
+        if not path.lower().endswith('.xlsx'):
+            path += '.xlsx'
+
+        headers, rows = self._table_visible_headers_and_rows(tbl)
 
         try:
             self._write_xlsx(path, headers, rows, name)
@@ -2117,6 +2125,35 @@ class QDRIPDialog(QDialog):
                 f'{len(rows)} ligne(s) exportée(s) :\n{path}')
         except Exception as e:
             QMessageBox.critical(self, 'Erreur export', str(e))
+
+    def _export_csv_table(self, tbl, name):
+        """Export générique : toutes les colonnes visibles d'un tableau en CSV.
+
+        Utilisé par les tableaux dont la structure de colonnes est dynamique
+        (ex. extraction de couche libre), à la différence des exports CSV
+        EPA/BAL qui ont un format de colonnes fixe et dédié.
+        """
+        if tbl.rowCount() == 0:
+            QMessageBox.information(self, 'Export CSV',
+                'Aucune donnée à exporter.\nLancez d\'abord la prévisualisation.')
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Exporter CSV', f'{name}.csv', 'CSV (*.csv)')
+        if not path:
+            return
+        if not path.lower().endswith('.csv'):
+            path += '.csv'
+        try:
+            import csv as _csv
+            headers, rows = self._table_visible_headers_and_rows(tbl)
+            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = _csv.writer(f, delimiter=';')
+                writer.writerow(headers)
+                writer.writerows(rows)
+            QMessageBox.information(self, 'Export CSV',
+                f'{len(rows)} ligne(s) exportée(s) :\n{path}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Erreur export CSV', str(e))
 
     # ── Écriture XLSX native (OOXML, sans dépendance externe) ────────────────
     @staticmethod
@@ -2887,6 +2924,7 @@ class QDRIPDialog(QDialog):
         self.cmb_extract_type = QComboBox()
         self.cmb_extract_type.addItem('EPA / PA du périmètre PM')
         self.cmb_extract_type.addItem('BAL du périmètre PM')
+        self.cmb_extract_type.addItem('Couche libre (n\'importe quelle couche)')
         self.cmb_extract_type.setMinimumWidth(240)
         self.cmb_extract_type.setToolTip(
             'Choisir le type de données à extraire pour le périmètre PM courant.')
@@ -2901,6 +2939,7 @@ class QDRIPDialog(QDialog):
 
         self.stk_extract.addWidget(self._extract_panel_epa())   # index 0
         self.stk_extract.addWidget(self._extract_panel_bal())   # index 1
+        self.stk_extract.addWidget(self._extract_panel_free())  # index 2
 
         main_v.addWidget(self.stk_extract, 1)
         return root
@@ -3148,6 +3187,80 @@ class QDRIPDialog(QDialog):
         h.addWidget(res, 1)
         return w
 
+    def _extract_panel_free(self):
+        """Build the free-layer extraction panel (page 2 of stk_extract).
+
+        Permet d'extraire n'importe quelle couche vecteur du projet, avec les
+        mêmes boutons d'export (CSV / Excel / SHP) que les panneaux EPA / BAL.
+        Pas de colonne État Notion ici (hors PA/BAL).
+        """
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 4, 0, 0)
+
+        cfg = QGroupBox('Configuration')
+        cfg.setFixedWidth(290)
+        vbox = QVBoxLayout(cfg)
+        frm = QFormLayout()
+
+        self.cb_layer_free = QgsMapLayerComboBox()
+        self.cb_layer_free.setFilters(_F_VECTOR)
+        self.cb_layer_free.setToolTip('Couche vecteur du projet à extraire (toutes géométries).')
+        frm.addRow('Couche :', self.cb_layer_free)
+        vbox.addLayout(frm)
+
+        info = QLabel(
+            '<small><i>Extrait toutes les entités de la couche choisie : '
+            'une colonne par champ, une ligne par entité.<br>'
+            'Respecte le filtre « Restreindre au périmètre PM » ci-dessus : '
+            'si activé et que la couche a une géométrie, seules les entités '
+            'intersectant le périmètre PM (za_sro) sont gardées ; sinon '
+            'toutes les entités sont affichées.</i></small>'
+        )
+        info.setWordWrap(True)
+        vbox.addWidget(info)
+        vbox.addStretch()
+
+        btn_run = QPushButton('🔎  Prévisualiser')
+        btn_run.setStyleSheet('font-weight:bold; padding:6px;')
+        btn_run.clicked.connect(self._run_extract_free)
+        vbox.addWidget(btn_run)
+        h.addWidget(cfg)
+
+        res = QWidget()
+        rv = QVBoxLayout(res)
+        rv.setContentsMargins(0, 0, 0, 0)
+
+        sh = QHBoxLayout()
+        sh.addWidget(QLabel('Recherche :'))
+        self.le_srch_free = QLineEdit()
+        self.le_srch_free.setPlaceholderText('Filtrer…')
+        self.le_srch_free.textChanged.connect(
+            lambda txt: self._filter_table_multi(self.tbl_free, txt))
+        sh.addWidget(self.le_srch_free, 1)
+        self.lbl_cnt_free = QLabel('—')
+        sh.addWidget(self.lbl_cnt_free)
+        rv.addLayout(sh)
+
+        self.tbl_free = QTableWidget(0, 0)
+        self._style_table(self.tbl_free)
+        self.tbl_free.doubleClicked.connect(
+            lambda idx: self._zoom_row(self.tbl_free, idx.row()))
+        rv.addWidget(self.tbl_free)
+
+        rv.addWidget(self._extract_action_bar(
+            self.tbl_free,
+            zoom_slot  = lambda: self._zoom_selected(self.tbl_free),
+            sel_slot   = lambda: self._select_qgis(self.tbl_free),
+            csv_slot   = lambda: self._export_csv_table(self.tbl_free, 'extraction_libre'),
+            xlsx_slot  = lambda: self._export_xlsx(self.tbl_free, 'extraction_libre'),
+            shp_slot   = lambda: self._export_shp(self.tbl_free, 'extraction_libre'),
+            csv_tooltip = 'Exporter toutes les colonnes visibles en CSV (UTF-8, séparateur ;)',
+        ))
+
+        h.addWidget(res, 1)
+        return w
+
     # ─────────────────────────────────────────────────────────────────────────
     # ANALYSIS – Tab 6: Extractions EPA
     # ─────────────────────────────────────────────────────────────────────────
@@ -3374,6 +3487,90 @@ class QDRIPDialog(QDialog):
                 f'{len(rows)} ligne(s) exportée(s) :\n{path}')
         except Exception as e:
             QMessageBox.critical(self, 'Erreur export CSV', str(e))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ANALYSIS – Tab 6 (suite) : Extraction d'une couche libre
+    # ─────────────────────────────────────────────────────────────────────────
+    def _build_zasro_pm_index(self):
+        """Index spatial des polygones za_sro dont le code PM est dans le
+        périmètre courant (self._pm_set), utilisé pour restreindre l'extraction
+        d'une couche libre par intersection géométrique.
+
+        Retourne (index, géométries par fid) ou (None, None) si le filtre
+        périmètre PM est inactif, ou si aucune couche za_sro exploitable
+        n'est configurée (repli : aucune restriction spatiale possible).
+        """
+        if not self.chk_pm.isChecked() or not self._pm_set:
+            return None, None
+        zasro_lyr = self.cb_zasro.currentLayer()
+        if not zasro_lyr or 'sro' not in zasro_lyr.fields().names():
+            return None, None
+        idx = QgsSpatialIndex()
+        geoms = {}
+        for ft in zasro_lyr.getFeatures():
+            sro_v = str(ft['sro']).strip() if ft['sro'] is not None else ''
+            if sro_v not in self._pm_set:
+                continue
+            idx.insertFeature(ft)
+            geoms[ft.id()] = ft.geometry()
+        return idx, geoms
+
+    @staticmethod
+    def _feature_in_pm_perimeter(geom, zasro_idx, zasro_geoms):
+        """True si geom intersecte un polygone za_sro du périmètre PM courant."""
+        for fid in zasro_idx.intersects(geom.boundingBox()):
+            if zasro_geoms[fid].intersects(geom):
+                return True
+        return False
+
+    def _run_extract_free(self):
+        lyr = self.cb_layer_free.currentLayer()
+        if not lyr:
+            QMessageBox.warning(self, 'Extraction couche libre',
+                                 'Sélectionnez une couche.')
+            return
+
+        real_fields = lyr.fields().names()
+        display_fields = list(real_fields) if real_fields else ['(entité)']
+
+        zasro_idx, zasro_geoms = self._build_zasro_pm_index()
+
+        self.lbl_status.setText('Extraction couche libre en cours…')
+        QApplication.processEvents()
+
+        feats = []
+        for ft in lyr.getFeatures():
+            geom = ft.geometry()
+            if zasro_idx is not None and geom and not geom.isEmpty():
+                if not self._feature_in_pm_perimeter(geom, zasro_idx, zasro_geoms):
+                    continue
+            feats.append(ft)
+
+        layer_id = lyr.id()
+        self.tbl_free.setSortingEnabled(False)
+        self.tbl_free.setRowCount(0)
+        self.tbl_free.setColumnCount(len(display_fields))
+        self.tbl_free.setHorizontalHeaderLabels(display_fields)
+
+        for ft in feats:
+            row = self.tbl_free.rowCount()
+            self.tbl_free.insertRow(row)
+            for col, fname in enumerate(display_fields):
+                if real_fields:
+                    val = ft[fname]
+                    text = '' if val is None else str(val)
+                else:
+                    text = str(ft.id())
+                item = QTableWidgetItem(text)
+                if col == 0:
+                    item.setData(Qt.ItemDataRole.UserRole + 1, ft.id())
+                    item.setData(Qt.ItemDataRole.UserRole + 2, layer_id)
+                self.tbl_free.setItem(row, col, item)
+        self.tbl_free.setSortingEnabled(True)
+
+        n = len(feats)
+        self.lbl_cnt_free.setText(f'{n} entité(s)')
+        self.lbl_status.setText(f'Extraction « {lyr.name()} » : {n} entité(s).')
 
     # ─────────────────────────────────────────────────────────────────────────
     # ─────────────────────────────────────────────────────────────────────────
