@@ -30,6 +30,17 @@ Plugin de contrôle qualité des données RIP Auvergne.
 
 ## Changelog
 
+### Version 1.4.3
+- État Notion limité au sujet de chaque onglet (une seule colonne pertinente par tableau, fini les colonnes hors sujet)
+- Extraction d'une couche quelconque depuis l'onglet **Extractions**, export CSV/Excel/SHP avec les boutons existants
+- **Chevauchements C0 / Existant**, **Doublons Infra** et **Parcours les plus longs** n'affichent plus de colonne État Notion : chaque ligne y représente une entité infra (le sujet de la ligne), pas un PA ni une BAL — `id_pa` n'y est qu'un attribut secondaire référencé, pas une clé de jointure pertinente
+- **BAL éloignées infra** n'affiche plus qu'une seule colonne **État Notion** (celle de la BAL, sujet de la ligne) ; la colonne sur `id_pa infra` (PA de l'infra la plus proche, secondaire) a été supprimée
+- **PA sans infra** et les tableaux EPA/BAL de l'onglet **Extractions** sont inchangés (une seule entité = sujet de la ligne = une seule colonne État Notion)
+- Nouveau type d'extraction **« Couche libre (n'importe quelle couche) »** dans l'onglet **📤 Extractions** : sélecteur de couche listant toutes les couches vecteur du projet, aperçu avec une colonne par champ et une ligne par entité
+- Respecte le filtre global **« Restreindre au périmètre PM »** : si activé et que les entités ont une géométrie, seules celles intersectant le périmètre PM (couche za_sro) sont gardées ; sinon toutes les entités sont affichées
+- Réutilise les boutons d'export existants **Exporter CSV / Exporter Excel / Exporter SHP** (factorisation : nouvel export CSV générique `_export_csv_table` partagé, aucune nouvelle boîte de dialogue de format)
+- Pas de colonne État Notion sur cette extraction libre (hors PA/BAL)
+
 ### Version 1.4.2
 - État Notion sur toutes les listes PA/BAL + chargement asynchrone non bloquant (fini les ralentissements)
 - Colonne **État Notion** (pastille couleur), filtre déroulant et bouton **🔗 Ouvrir dans Notion** désormais disponibles sur **Chevauchements C0 / Existant**, **Doublons Infra** (PA 1 et PA 2), **Parcours les plus longs**, **BAL éloignées infra** (BAL et PA infra) et **PA sans infra**, en plus des tableaux EPA/BAL de l'onglet Extractions
