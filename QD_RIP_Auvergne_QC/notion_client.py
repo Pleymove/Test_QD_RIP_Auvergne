@@ -13,7 +13,7 @@ jamais journalisé ni écrit sur disque ici.
 
 import json
 
-from qgis.PyQt.QtCore import QUrl, QByteArray
+from qgis.PyQt.QtCore import QUrl, QByteArray, QObject, pyqtSignal
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtNetwork import QNetworkRequest
 from qgis.core import QgsBlockingNetworkRequest
@@ -147,3 +147,33 @@ def fetch_database_states(database_id, token, title_field, status_field='État')
         raise NotionClientError(f'Échec de la lecture de la base Notion : {exc}')
 
     return result
+
+
+class NotionFetchWorker(QObject):
+    """Worker exécuté dans un QThread dédié pour charger les états PA/BAL.
+
+    QgsBlockingNetworkRequest est conçu pour être utilisé depuis un thread
+    secondaire (QGIS fournit une instance de QgsNetworkAccessManager par
+    thread) : l'appel reste synchrone à l'intérieur de ce worker, mais le
+    thread GUI n'est jamais bloqué puisque run() s'exécute hors thread GUI.
+    """
+
+    # pa_map, bal_map (dict ou None en cas d'échec), msg_pa, msg_bal
+    finished = pyqtSignal(object, object, str, str)
+
+    def __init__(self, token):
+        super().__init__()
+        self._token = token
+
+    def run(self):
+        pa_map = bal_map = None
+        msg_pa = msg_bal = ''
+        try:
+            pa_map = fetch_database_states(NOTION_DB_PA, self._token, 'id_epa')
+        except Exception as exc:
+            msg_pa = str(exc)
+        try:
+            bal_map = fetch_database_states(NOTION_DB_BAL, self._token, 'id_bal')
+        except Exception as exc:
+            msg_bal = str(exc)
+        self.finished.emit(pa_map, bal_map, msg_pa, msg_bal)
