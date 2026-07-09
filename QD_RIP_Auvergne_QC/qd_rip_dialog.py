@@ -20,7 +20,7 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox, QFormLayout, QProgressDialog, QMessageBox,
     QApplication, QAbstractItemView, QFileDialog, QFrame,
     QSplitter, QPlainTextEdit, QDialogButtonBox, QTextBrowser, QComboBox,
-    QStackedWidget,
+    QStackedWidget, QMenu,
 )
 from qgis.PyQt.QtCore import Qt, QUrl, QSettings, QThread
 from qgis.PyQt.QtGui import QColor, QBrush, QFont, QDesktopServices, QIcon, QPixmap, QPainter
@@ -41,6 +41,10 @@ NOTION_SETTINGS_GROUP = 'QD_RIP_Auvergne/notion'
 # Scope des entrées personnalisées stockées DANS le projet QGIS (.qgz/.qgs).
 # Utilisé pour les doublons marqués "OK" : la liste voyage avec le projet.
 PROJECT_SCOPE = 'QD_RIP_Auvergne'
+
+# Groupe QSettings pour la persistance des réglages UI entre sessions
+# (filtres, tolérances, liste PM, géométrie de la fenêtre, onglet courant).
+UI_SETTINGS_GROUP = 'QD_RIP_Auvergne/ui'
 
 # Resolution du filtre de couche, compatible QGIS 3.16 -> 4.x
 try:
@@ -140,6 +144,7 @@ class QDRIPDialog(QDialog):
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
         self._build_ui()
         self._auto_select_layers()
+        self._restore_ui_settings()
 
     # ─── layer helpers ───────────────────────────────────────────────────────
 
@@ -300,7 +305,8 @@ class QDRIPDialog(QDialog):
         hints = self._LAYER_HINTS
         infra = self._find_layer(*hints['infra'])
         for cb in (self.cb_infra_chev, self.cb_infra_doub,
-                   self.cb_infra_parc, self.cb_infra_bal):
+                   self.cb_infra_parc, self.cb_infra_bal,
+                   self.cb_infra_qc):
             if infra:
                 cb.setLayer(infra)
 
@@ -331,6 +337,7 @@ class QDRIPDialog(QDialog):
         pa_zapa = self._find_pa_zapa_layer()
         if pa_zapa:
             self.cb_zapa.setLayer(pa_zapa)
+            self.cb_zapa_qc.setLayer(pa_zapa)
 
         pa_infra = self._find_pa_infra_layer()
         if pa_infra:
@@ -339,6 +346,7 @@ class QDRIPDialog(QDialog):
         pa_bal = self._find_pa_bal_layer()
         if pa_bal:
             self.cb_bal_pa.setLayer(pa_bal)
+            self.cb_bal_qc.setLayer(pa_bal)
 
         epa = self._find_extraction_pa_layer()
         if epa:
@@ -464,23 +472,46 @@ class QDRIPDialog(QDialog):
         btn_pm = QPushButton('Modifier la liste…')
         btn_pm.clicked.connect(self._edit_pm_list)
         pm_bar.addWidget(btn_pm)
+        btn_all = QPushButton('▶  Tout analyser')
+        btn_all.setToolTip(
+            'Lance successivement toutes les analyses dont les couches sont\n'
+            'sélectionnées (chevauchements, doublons, parcours, BAL éloignées,\n'
+            'PA sans infra, contrôles divers), puis affiche un récapitulatif.'
+        )
+        btn_all.setStyleSheet('font-weight:bold;')
+        btn_all.clicked.connect(self._run_all_analyses)
+        pm_bar.addWidget(btn_all)
         pm_bar.addStretch()
         root.addLayout(pm_bar)
         self._refresh_pm_label()
 
+        # Les titres de base sont mémorisés pour afficher un badge de compteur
+        # après chaque analyse : "⛔ Doublons Infra (12)".
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._tab_chevauchement(),    '⚠  Chevauchements C0 / Existant')
-        self.tabs.addTab(self._tab_doublons(),         '⛔  Doublons Infra')
-        self.tabs.addTab(self._tab_parcours(),         '📏  Parcours les plus longs')
-        self.tabs.addTab(self._tab_bal(),              '📍  BAL éloignées infra')
-        self.tabs.addTab(self._tab_pa_sans_infra(),    '🚫  PA sans infra')
-        self.tabs.addTab(self._tab_extractions(),      '📤  Extractions')
-        self.tabs.addTab(self._tab_rapport(),          '📊  Tableau de bord')
+        self._tab_base_titles = {}
+
+        def _add_tab(page, title):
+            idx = self.tabs.addTab(page, title)
+            self._tab_base_titles[idx] = title
+            return idx
+
+        self._tabidx_chev = _add_tab(self._tab_chevauchement(), '⚠  Chevauchements C0 / Existant')
+        self._tabidx_doub = _add_tab(self._tab_doublons(),      '⛔  Doublons Infra')
+        self._tabidx_parc = _add_tab(self._tab_parcours(),      '📏  Parcours les plus longs')
+        self._tabidx_bal  = _add_tab(self._tab_bal(),           '📍  BAL éloignées infra')
+        self._tabidx_pa   = _add_tab(self._tab_pa_sans_infra(), '🚫  PA sans infra')
+        self._tabidx_qc   = _add_tab(self._tab_qc(),            '🧪  Contrôles divers')
+        _add_tab(self._tab_extractions(), '📤  Extractions')
+        _add_tab(self._tab_rapport(),     '📊  Tableau de bord')
         root.addWidget(self.tabs)
 
         bar = QHBoxLayout()
         self.lbl_status = QLabel('Prêt.')
         bar.addWidget(self.lbl_status, 1)
+        btn_help = QPushButton('❔  Aide')
+        btn_help.setToolTip('Guide rapide des onglets et des principales fonctions.')
+        btn_help.clicked.connect(self._show_help)
+        bar.addWidget(btn_help)
         btn_notion_settings = QPushButton('⚙️  Réglages Notion')
         btn_notion_settings.setToolTip(
             'Configurer le jeton Notion et les identifiants des bases de suivi PA / BAL.\n'
@@ -513,10 +544,103 @@ class QDRIPDialog(QDialog):
 
     def closeEvent(self, event):
         """Arrête proprement le thread de chargement Notion s'il est actif."""
+        try:
+            self._save_ui_settings()
+        except Exception:
+            pass  # la sauvegarde des réglages ne doit jamais bloquer la fermeture
         if self._notion_thread is not None:
             self._notion_thread.quit()
             self._notion_thread.wait()
         super().closeEvent(event)
+
+    # ─── persistance des réglages UI (QSettings) ─────────────────────────────
+
+    def _ui_settings_widgets(self):
+        """Registre clé -> widget des réglages persistés entre sessions."""
+        return {
+            'pm/actif':        self.chk_pm,
+            'chev/c0_filter':  self.le_c0_filter,
+            'chev/ft_on':      self.chk_ft,
+            'chev/ft_filter':  self.le_ft_filter,
+            'chev/bt_on':      self.chk_bt,
+            'chev/bt_filter':  self.le_bt_filter,
+            'chev/athd_on':    self.chk_athd,
+            'chev/athd_filter': self.le_athd_filter,
+            'chev/chemi_on':   self.chk_chemi,
+            'chev/chemi_filter': self.le_chemi_filter,
+            'chev/tol':        self.sp_tol_chev,
+            'chev/min':        self.sp_min_chev,
+            'doub/filter':     self.le_flt_doub,
+            'doub/tol':        self.sp_tol_doub,
+            'doub/min':        self.sp_min_doub,
+            'doub/hide_ok':    self.chk_hide_doub_ok,
+            'parc/filter':     self.le_flt_parc,
+            'parc/topn':       self.sp_topn,
+            'bal/filter':      self.le_flt_bal,
+            'bal/rayon':       self.sp_rayon,
+            'bal/use_rayon':   self.chk_use_rayon,
+            'bal/flt_dist':    self.chk_flt_dist,
+            'bal/dist_min':    self.sp_dist_min,
+            'pa/tol':          self.sp_tol_pa,
+            'pa/discord':      self.chk_discord,
+            'qc/filter':       self.le_flt_qc,
+            'qc/micro_seuil':  self.sp_micro_qc,
+            'qc/geom':         self.chk_qc_geom,
+            'qc/micro':        self.chk_qc_micro,
+            'qc/champs':       self.chk_qc_champs,
+            'qc/bal_zapa':     self.chk_qc_bal,
+            'qc/dup_zapa':     self.chk_qc_dup,
+        }
+
+    def _save_ui_settings(self):
+        s = QSettings()
+        s.beginGroup(UI_SETTINGS_GROUP)
+        for key, w in self._ui_settings_widgets().items():
+            if isinstance(w, QCheckBox):
+                s.setValue(key, w.isChecked())
+            elif isinstance(w, QLineEdit):
+                s.setValue(key, w.text())
+            elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                s.setValue(key, w.value())
+        s.setValue('pm_codes', self._pm_codes)
+        s.setValue('geometry', self.saveGeometry())
+        s.setValue('tab', self.tabs.currentIndex())
+        s.endGroup()
+
+    def _restore_ui_settings(self):
+        """Restaure les réglages de la session précédente (best-effort)."""
+        s = QSettings()
+        s.beginGroup(UI_SETTINGS_GROUP)
+        try:
+            for key, w in self._ui_settings_widgets().items():
+                if not s.contains(key):
+                    continue
+                try:
+                    if isinstance(w, QCheckBox):
+                        w.setChecked(s.value(key, type=bool))
+                    elif isinstance(w, QLineEdit):
+                        w.setText(s.value(key, type=str))
+                    elif isinstance(w, QDoubleSpinBox):
+                        w.setValue(s.value(key, type=float))
+                    elif isinstance(w, QSpinBox):
+                        w.setValue(s.value(key, type=int))
+                except (TypeError, ValueError):
+                    continue  # valeur corrompue : on garde le défaut
+            pm = s.value('pm_codes')
+            if pm:
+                if isinstance(pm, str):   # QSettings peut aplatir une liste de 1
+                    pm = [pm]
+                self._pm_codes = [str(c).strip() for c in pm if str(c).strip()]
+                self._pm_set = set(self._pm_codes)
+                self._refresh_pm_label()
+            geo = s.value('geometry')
+            if geo:
+                self.restoreGeometry(geo)
+            tab = s.value('tab', -1, type=int)
+            if 0 <= tab < self.tabs.count():
+                self.tabs.setCurrentIndex(tab)
+        finally:
+            s.endGroup()
 
     # ─── périmètre PM ─────────────────────────────────────────────────────────
 
@@ -541,6 +665,12 @@ class QDRIPDialog(QDialog):
             self._pm_codes = codes
             self._pm_set = set(codes)
             self._refresh_pm_label()
+            # Persistance immédiate : la liste PM éditée est retrouvée à la
+            # prochaine ouverture même si QGIS se ferme brutalement.
+            s = QSettings()
+            s.beginGroup(UI_SETTINGS_GROUP)
+            s.setValue('pm_codes', self._pm_codes)
+            s.endGroup()
 
     def _in_pm(self, feat, fnames):
         """True si l'entité est dans le périmètre PM (ou si le filtre est inactif)."""
@@ -613,6 +743,165 @@ class QDRIPDialog(QDialog):
         h.addWidget(btn_csv)
 
         return w, btn_zoom, btn_sel, btn_csv
+
+    def _install_ctx_menu(self, tbl, zoom_cb, select_cb, extra_actions=None):
+        """Menu contextuel (clic droit) commun aux tableaux de résultats.
+
+        Zoomer / Sélectionner dans QGIS / Copier cellule / Copier ligne,
+        plus des actions spécifiques optionnelles [(libellé, callback), …].
+        """
+        tbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+        def _show(pos):
+            row = tbl.rowAt(pos.y())
+            if row < 0:
+                return
+            tbl.selectRow(row)
+            menu = QMenu(tbl)
+            act_zoom = menu.addAction('🔍  Zoomer')
+            act_sel  = menu.addAction('✓  Sélectionner dans QGIS')
+            menu.addSeparator()
+            act_cell = menu.addAction('📋  Copier la cellule')
+            act_row  = menu.addAction('📋  Copier la ligne')
+            extras = []
+            if extra_actions:
+                menu.addSeparator()
+                for label, cb in extra_actions:
+                    extras.append((menu.addAction(label), cb))
+            chosen = menu.exec(tbl.viewport().mapToGlobal(pos))
+            if chosen is None:
+                return
+            if chosen == act_zoom:
+                zoom_cb()
+            elif chosen == act_sel:
+                select_cb()
+            elif chosen == act_cell:
+                item = tbl.itemAt(pos)
+                QApplication.clipboard().setText(item.text() if item else '')
+            elif chosen == act_row:
+                QApplication.clipboard().setText('\t'.join(
+                    tbl.item(row, c).text() if tbl.item(row, c) else ''
+                    for c in range(tbl.columnCount())))
+            else:
+                for act, cb in extras:
+                    if chosen == act:
+                        cb()
+                        break
+
+        tbl.customContextMenuRequested.connect(_show)
+
+    def _set_tab_badge(self, idx, count):
+        """Affiche le nombre d'anomalies dans le titre de l'onglet."""
+        base = getattr(self, '_tab_base_titles', {}).get(idx)
+        if base is None:
+            return
+        self.tabs.setTabText(idx, base if count is None else f'{base}  ({count})')
+
+    def _run_all_analyses(self):
+        """Lance toutes les analyses dont les couches sont sélectionnées."""
+        jobs = [
+            ('Chevauchements C0/Existant', self._run_chevauchement,
+             [self.cb_infra_chev]),
+            ('Doublons Infra', self._run_doublons, [self.cb_infra_doub]),
+            ('Parcours les plus longs', self._run_parcours, [self.cb_infra_parc]),
+            ('BAL éloignées infra', self._run_bal,
+             [self.cb_bal, self.cb_infra_bal]),
+            ('PA sans infra', self._run_pa_sans_infra,
+             [self.cb_zapa, self.cb_infra_pa, self.cb_bal_pa]),
+            ('Contrôles divers', self._run_qc,
+             [self.cb_infra_qc]),
+        ]
+        done, skipped, failed = [], [], []
+        for name, fn, combos in jobs:
+            if any(cb.currentLayer() is None for cb in combos):
+                skipped.append(name)
+                continue
+            try:
+                fn()
+                done.append(name)
+            except Exception as e:          # une analyse en échec n'arrête pas les autres
+                failed.append(f'{name} : {e}')
+        parts = []
+        if done:
+            parts.append('✅ Analyses effectuées :\n  • ' + '\n  • '.join(done))
+        if skipped:
+            parts.append('⏭ Ignorées (couche non sélectionnée) :\n  • '
+                         + '\n  • '.join(skipped))
+        if failed:
+            parts.append('❌ En erreur :\n  • ' + '\n  • '.join(failed))
+        QMessageBox.information(
+            self, 'Tout analyser',
+            '\n\n'.join(parts) if parts else 'Aucune analyse à lancer.')
+        self.lbl_status.setText(
+            f'Tout analyser : {len(done)} analyse(s) effectuée(s), '
+            f'{len(skipped)} ignorée(s), {len(failed)} en erreur.')
+
+    # ─── aide ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _plugin_version():
+        try:
+            path = os.path.join(os.path.dirname(__file__), 'metadata.txt')
+            with open(path, encoding='utf-8') as f:
+                for line in f:
+                    if line.startswith('version='):
+                        return line.split('=', 1)[1].strip()
+        except Exception:
+            pass
+        return '?'
+
+    def _show_help(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Aide — QD RIP Auvergne')
+        dlg.resize(680, 560)
+        v = QVBoxLayout(dlg)
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(f'''
+            <h2>QD RIP Auvergne — v{self._plugin_version()}</h2>
+            <p><b>Périmètre PM</b> : la case « Restreindre au périmètre PM » (en haut)
+            s'applique à toutes les analyses ; la liste des codes PM est éditable et
+            <i>conservée entre les sessions</i>. « ▶ Tout analyser » lance toutes les
+            analyses dont les couches sont sélectionnées.</p>
+            <h3>Onglets</h3>
+            <ul>
+              <li><b>⚠ Chevauchements C0 / Existant</b> : infra C0 passant sur les couches
+                  existantes (ft_arciti, bt, athd_artere, t_cheminement).</li>
+              <li><b>⛔ Doublons Infra</b> : paires d'entités superposées. Bouton
+                  <b>👌 Doublon OK</b> pour flaguer les faux positifs assumés (persistés
+                  dans le projet QGIS), case « Masquer les doublons OK » pour les filtrer.</li>
+              <li><b>📏 Parcours les plus longs</b> : classement par longueur (Top N).</li>
+              <li><b>📍 BAL éloignées infra</b> : distance BAL → infra par PM, avec état
+                  Notion de la BAL.</li>
+              <li><b>🚫 PA sans infra</b> : ZAPA du périmètre sans infra rattachée
+                  (contrôles attributaire + spatial), avec état Notion du PA.</li>
+              <li><b>🧪 Contrôles divers</b> : géométries invalides/vides, micro-tronçons,
+                  champs obligatoires vides, BAL sans ZAPA, ZAPA en doublon d'identifiant.</li>
+              <li><b>📤 Extractions</b> : EPA / BAL du périmètre, ou n'importe quelle
+                  couche vecteur (« Couche libre »), export CSV / Excel / SHP.</li>
+              <li><b>📊 Tableau de bord</b> : synthèse ; « Générer Rapport » produit un
+                  rapport HTML avec les résultats <i>visibles</i> des analyses lancées.</li>
+            </ul>
+            <h3>Astuces</h3>
+            <ul>
+              <li>Double-clic sur une ligne = zoom carte ; clic droit = menu
+                  Zoomer / Sélectionner / Copier.</li>
+              <li>Les exports (CSV / Excel / SHP) portent sur les lignes
+                  <i>visibles</i> : recherche et filtres sont donc appliqués.</li>
+              <li>Le nombre d'anomalies s'affiche dans le titre de chaque onglet
+                  après analyse.</li>
+              <li>Tous les réglages (filtres, tolérances, liste PM, onglet courant,
+                  taille de fenêtre) sont retrouvés à la prochaine ouverture.</li>
+              <li>Le jeton Notion se configure via « ⚙️ Réglages Notion » ; il est
+                  stocké uniquement en local, jamais dans le code.</li>
+            </ul>
+        ''')
+        v.addWidget(browser)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(dlg.reject)
+        bb.clicked.connect(dlg.accept)
+        v.addWidget(bb)
+        dlg.exec()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Intégration Notion (État PA / BAL)
@@ -1016,6 +1305,10 @@ class QDRIPDialog(QDialog):
         self.tbl_chev.doubleClicked.connect(
             lambda idx: self._zoom_row(self.tbl_chev, idx.row())
         )
+        self._install_ctx_menu(
+            self.tbl_chev,
+            zoom_cb=lambda: self._zoom_selected(self.tbl_chev),
+            select_cb=lambda: self._select_qgis(self.tbl_chev))
         rv.addWidget(self.tbl_chev)
 
         ab, bz, bs, bc = self._action_bar(self.tbl_chev, 'chev')
@@ -1116,6 +1409,12 @@ class QDRIPDialog(QDialog):
         self.tbl_doub.doubleClicked.connect(
             lambda idx: self._zoom_row_doub(idx.row())
         )
+        self._install_ctx_menu(
+            self.tbl_doub,
+            zoom_cb=lambda: self._zoom_row_doub(self.tbl_doub.currentRow()),
+            select_cb=self._select_qgis_doub,
+            extra_actions=[('👌  Doublon OK (marquer / retirer)',
+                            self._toggle_doub_ok)])
         rv.addWidget(self.tbl_doub)
 
         btn_ok_doub = QPushButton('👌  Doublon OK')
@@ -1206,6 +1505,10 @@ class QDRIPDialog(QDialog):
         self.tbl_parc.doubleClicked.connect(
             lambda idx: self._zoom_row(self.tbl_parc, idx.row())
         )
+        self._install_ctx_menu(
+            self.tbl_parc,
+            zoom_cb=lambda: self._zoom_selected(self.tbl_parc),
+            select_cb=lambda: self._select_qgis(self.tbl_parc))
         rv.addWidget(self.tbl_parc)
 
         ab, bz, bs, bc = self._action_bar(self.tbl_parc, 'parc')
@@ -1362,6 +1665,10 @@ class QDRIPDialog(QDialog):
         self.tbl_bal.doubleClicked.connect(
             lambda idx: self._zoom_row(self.tbl_bal, idx.row())
         )
+        self._install_ctx_menu(
+            self.tbl_bal,
+            zoom_cb=lambda: self._zoom_selected(self.tbl_bal),
+            select_cb=lambda: self._select_qgis(self.tbl_bal))
         rv.addWidget(self.tbl_bal)
 
         ab, bz, bs, bc = self._action_bar(self.tbl_bal, 'bal')
@@ -1533,6 +1840,7 @@ class QDRIPDialog(QDialog):
 
         n = len(results)
         self.lbl_cnt_chev.setText(f'{n} conflit(s)')
+        self._set_tab_badge(self._tabidx_chev, n)
         self.lbl_status.setText(
             f'Chevauchements : {n} conflit(s) sur {len(c0_feats)} entités C0.')
         self._refresh_rapport_tab()
@@ -1629,6 +1937,8 @@ class QDRIPDialog(QDialog):
         self._update_doub_count()
 
     def _update_doub_count(self):
+        if not getattr(self, '_doub_ran', False):
+            return  # rien à compter avant la première analyse
         tbl = self.tbl_doub
         total = tbl.rowCount()
         n_ok = sum(
@@ -1641,6 +1951,9 @@ class QDRIPDialog(QDialog):
                 f'{visible} affiché(s) / {total} doublon(s) — {n_ok} OK')
         else:
             self.lbl_cnt_doub.setText(f'{total} doublon(s)')
+        # Badge = doublons restant à traiter (hors marqués OK)
+        if hasattr(self, '_tabidx_doub'):
+            self._set_tab_badge(self._tabidx_doub, total - n_ok)
 
     def _run_doublons(self):
         lyr = self.cb_infra_doub.currentLayer()
@@ -1780,6 +2093,7 @@ class QDRIPDialog(QDialog):
         self.tbl_doub.sortByColumn(8, Qt.SortOrder.DescendingOrder)
 
         n = len(results)
+        self._doub_ran = True
         self._refilter_doub()
         self.lbl_status.setText(
             f'Doublons : {n} paire(s) sur {len(feats)} entités.')
@@ -1850,6 +2164,7 @@ class QDRIPDialog(QDialog):
         self.tbl_parc.setSortingEnabled(True)
         n = len(feats)
         self.lbl_cnt_parc.setText(f'{n} parcours')
+        self._set_tab_badge(self._tabidx_parc, n)
         self.lbl_status.setText(f'Parcours chargés : {n} (top {top_n}).')
         self._refresh_rapport_tab()
 
@@ -2075,6 +2390,7 @@ class QDRIPDialog(QDialog):
             cnt_txt += ' — sans filtre dist.'
 
         self.lbl_cnt_bal.setText(cnt_txt)
+        self._set_tab_badge(self._tabidx_bal, n)
         self.lbl_status.setText(
             f'BAL éloignées : {n} affichées'
             + (f' — rayon {int(radius)} m' if use_rayon else f' sur {n_total} analysées')
@@ -2697,6 +3013,10 @@ class QDRIPDialog(QDialog):
         self.tbl_pa.doubleClicked.connect(
             lambda idx: self._zoom_row(self.tbl_pa, idx.row())
         )
+        self._install_ctx_menu(
+            self.tbl_pa,
+            zoom_cb=lambda: self._zoom_selected(self.tbl_pa),
+            select_cb=lambda: self._select_qgis(self.tbl_pa))
         rv.addWidget(self.tbl_pa)
 
         ab, bz, bs, bc = self._action_bar(self.tbl_pa, 'pa')
@@ -3039,11 +3359,323 @@ class QDRIPDialog(QDialog):
         if ignored_empty_zapa:
             cnt_txt += f' — {ignored_empty_zapa} ZAPA sans BAL ignorées'
         self.lbl_cnt_pa.setText(cnt_txt)
+        self._set_tab_badge(self._tabidx_pa, len(results))
         self.lbl_status.setText(
             f'PA sans infra : {n_sans} ZAPA sans infra sur {n_total} ZAPA avec BAL analysées.'
             + (f' {ignored_empty_zapa} ZAPA sans BAL ignorées.' if ignored_empty_zapa else ''))
         self._refresh_notion_for_table(self.tbl_pa)
         self._refresh_rapport_tab()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 5 bis – Contrôles divers (qualité de données complémentaire)
+    # ─────────────────────────────────────────────────────────────────────────
+    def _tab_qc(self):
+        root = QWidget()
+        h = QHBoxLayout(root)
+
+        cfg = QGroupBox('Configuration')
+        cfg.setFixedWidth(310)
+        vbox = QVBoxLayout(cfg)
+
+        frm = QFormLayout()
+        self.cb_infra_qc = QgsMapLayerComboBox()
+        self.cb_infra_qc.setFilters(_F_LINE)
+        frm.addRow('Couche Infra :', self.cb_infra_qc)
+
+        self.le_flt_qc = QLineEdit()
+        self.le_flt_qc.setPlaceholderText('(toute l\'infra)')
+        self.le_flt_qc.setToolTip(
+            'Filtre QGIS optionnel appliqué à la couche Infra pour les\n'
+            'contrôles géométrie / micro-tronçons / champs vides.\n'
+            'Ex : "statut" = \'C\'')
+        frm.addRow('Filtre Infra :', self.le_flt_qc)
+
+        self.cb_zapa_qc = QgsMapLayerComboBox()
+        self.cb_zapa_qc.setFilters(_F_POLY)
+        self.cb_zapa_qc.setAllowEmptyLayer(True)
+        self.cb_zapa_qc.setToolTip(
+            'Couche ZAPA (polygones, champ id_metier) pour les contrôles\n'
+            'de doublons d\'identifiant et de référence des BAL.')
+        frm.addRow('Couche ZAPA :', self.cb_zapa_qc)
+
+        self.cb_bal_qc = QgsMapLayerComboBox()
+        self.cb_bal_qc.setFilters(_F_POINT)
+        self.cb_bal_qc.setAllowEmptyLayer(True)
+        self.cb_bal_qc.setToolTip(
+            'Couche BAL (points, champ zapa) pour le contrôle\n'
+            '« BAL sans ZAPA correspondante ».')
+        frm.addRow('Couche BAL :', self.cb_bal_qc)
+
+        self.sp_micro_qc = QDoubleSpinBox()
+        self.sp_micro_qc.setRange(0.01, 100.0)
+        self.sp_micro_qc.setValue(1.0)
+        self.sp_micro_qc.setSuffix(' m')
+        self.sp_micro_qc.setToolTip(
+            'Seuil des micro-tronçons : les entités infra plus courtes que\n'
+            'cette longueur sont signalées (scories de numérisation).')
+        frm.addRow('Seuil micro-tronçon :', self.sp_micro_qc)
+        vbox.addLayout(frm)
+
+        grp = QGroupBox('Contrôles à exécuter')
+        gv = QVBoxLayout(grp)
+        self.chk_qc_geom = QCheckBox('Géométries invalides / vides')
+        self.chk_qc_geom.setToolTip(
+            'Signale les géométries nulles/vides et les géométries non valides\n'
+            'au sens GEOS (auto-intersections…) sur Infra, ZAPA et BAL.')
+        self.chk_qc_micro = QCheckBox('Micro-tronçons infra')
+        self.chk_qc_micro.setToolTip(
+            'Entités infra plus courtes que le seuil (y compris longueur nulle).')
+        self.chk_qc_champs = QCheckBox('Champs obligatoires vides (infra)')
+        self.chk_qc_champs.setToolTip(
+            'Entités infra dont id_pa, sro ou nro est vide\n'
+            '(seuls les champs présents sur la couche sont contrôlés).')
+        self.chk_qc_bal = QCheckBox('BAL sans ZAPA correspondante')
+        self.chk_qc_bal.setToolTip(
+            'BAL dont le champ "zapa" est vide, ou référence un identifiant\n'
+            'absent du champ "id_metier" de la couche ZAPA.')
+        self.chk_qc_dup = QCheckBox('ZAPA en doublon d\'identifiant')
+        self.chk_qc_dup.setToolTip(
+            'ZAPA partageant le même id_metier (une ligne par entité concernée).')
+        for chk in (self.chk_qc_geom, self.chk_qc_micro, self.chk_qc_champs,
+                    self.chk_qc_bal, self.chk_qc_dup):
+            chk.setChecked(True)
+            gv.addWidget(chk)
+        vbox.addWidget(grp)
+
+        info = QLabel(
+            '<small><i>Contrôles de cohérence des données, complémentaires aux '
+            'analyses spatiales des autres onglets. Respecte la case '
+            '« Restreindre au périmètre PM » (champ sro).</i></small>'
+        )
+        info.setWordWrap(True)
+        vbox.addWidget(info)
+        vbox.addStretch()
+
+        btn_run = QPushButton('▶  Lancer les contrôles')
+        btn_run.setStyleSheet('font-weight:bold; padding:6px;')
+        btn_run.clicked.connect(self._run_qc)
+        vbox.addWidget(btn_run)
+        h.addWidget(cfg)
+
+        res = QWidget()
+        rv = QVBoxLayout(res)
+        rv.setContentsMargins(0, 0, 0, 0)
+
+        sh = QHBoxLayout()
+        sh.addWidget(QLabel('Recherche :'))
+        self.le_srch_qc = QLineEdit()
+        self.le_srch_qc.setPlaceholderText('Filtrer…')
+        self.le_srch_qc.textChanged.connect(
+            lambda t: self._filter_table_multi(self.tbl_qc, t))
+        sh.addWidget(self.le_srch_qc, 1)
+        self.lbl_cnt_qc = QLabel('—')
+        sh.addWidget(self.lbl_cnt_qc)
+        rv.addLayout(sh)
+
+        self.tbl_qc = QTableWidget(0, 5)
+        self.tbl_qc.setHorizontalHeaderLabels([
+            'Contrôle', 'Couche', 'ID entité', 'sro', 'Détail',
+        ])
+        self._style_table(self.tbl_qc)
+        self.tbl_qc.doubleClicked.connect(
+            lambda idx: self._zoom_row(self.tbl_qc, idx.row()))
+        self._install_ctx_menu(
+            self.tbl_qc,
+            zoom_cb=lambda: self._zoom_selected(self.tbl_qc),
+            select_cb=lambda: self._select_qgis(self.tbl_qc))
+        rv.addWidget(self.tbl_qc)
+
+        rv.addWidget(self._extract_action_bar(
+            self.tbl_qc,
+            zoom_slot  = lambda: self._zoom_selected(self.tbl_qc),
+            sel_slot   = lambda: self._select_qgis(self.tbl_qc),
+            csv_slot   = lambda: self._export_csv_table(self.tbl_qc, 'controles_divers'),
+            xlsx_slot  = lambda: self._export_xlsx(self.tbl_qc, 'controles_divers'),
+            shp_slot   = lambda: self._export_shp(self.tbl_qc, 'controles_divers'),
+            csv_tooltip = 'Exporter les anomalies visibles en CSV (UTF-8, séparateur ;)',
+        ))
+
+        h.addWidget(res, 1)
+        return root
+
+    def _run_qc(self):
+        """Exécute les contrôles de cohérence cochés et remplit tbl_qc."""
+        infra = self.cb_infra_qc.currentLayer()
+        zapa  = self.cb_zapa_qc.currentLayer()
+        bal   = self.cb_bal_qc.currentLayer()
+        if not (infra or zapa or bal):
+            QMessageBox.warning(self, 'Contrôles divers',
+                                'Sélectionnez au moins une couche.')
+            return
+
+        do_geom   = self.chk_qc_geom.isChecked()
+        do_micro  = self.chk_qc_micro.isChecked() and infra is not None
+        do_champs = self.chk_qc_champs.isChecked() and infra is not None
+        do_bal    = self.chk_qc_bal.isChecked() and bal is not None
+        do_dup    = self.chk_qc_dup.isChecked() and zapa is not None
+        seuil     = self.sp_micro_qc.value()
+
+        def _best_id(ft, fnames):
+            for f in ('id_pa', 'id_metier', 'id_bal', 'id'):
+                if f in fnames and ft[f] not in (None, ''):
+                    return str(ft[f])
+            return f'fid {ft.id()}'
+
+        def _sro_of(ft, fnames):
+            if 'sro' in fnames and ft['sro'] is not None:
+                return str(ft['sro'])
+            return ''
+
+        def _is_blank(v):
+            return v is None or str(v).strip() in ('', 'NULL')
+
+        # ── collecte des entités par couche (périmètre PM respecté) ─────────
+        layers = []   # (lyr, feats, fnames)
+        skipped = []  # contrôles non exécutables (champ manquant…)
+
+        if infra:
+            req = QgsFeatureRequest()
+            flt = self.le_flt_qc.text().strip()
+            if flt:
+                req.setFilterExpression(flt)
+            fn = infra.fields().names()
+            feats = [f for f in infra.getFeatures(req) if self._in_pm(f, fn)]
+            layers.append((infra, feats, fn))
+        if zapa:
+            fn = zapa.fields().names()
+            feats = [f for f in zapa.getFeatures() if self._in_pm(f, fn)]
+            layers.append((zapa, feats, fn))
+        if bal:
+            fn = bal.fields().names()
+            feats = [f for f in bal.getFeatures() if self._in_pm(f, fn)]
+            layers.append((bal, feats, fn))
+
+        # Pré-passes attributaires pour les contrôles croisés
+        zapa_ids = set()
+        zapa_id_counts = Counter()
+        if zapa:
+            zfn = zapa.fields().names()
+            if 'id_metier' in zfn:
+                for _lyr, feats, fn in layers:
+                    if _lyr is zapa:
+                        for ft in feats:
+                            v = ft['id_metier']
+                            if not _is_blank(v):
+                                zapa_ids.add(str(v).strip())
+                                zapa_id_counts[str(v).strip()] += 1
+            else:
+                if do_dup:
+                    skipped.append('ZAPA en doublon d\'ID (champ "id_metier" absent)')
+                    do_dup = False
+                if do_bal:
+                    skipped.append('BAL sans ZAPA (champ "id_metier" absent de la ZAPA)')
+                    do_bal = False
+        elif do_bal:
+            skipped.append('BAL sans ZAPA (couche ZAPA non sélectionnée)')
+            do_bal = False
+
+        if do_bal and 'zapa' not in bal.fields().names():
+            skipped.append('BAL sans ZAPA (champ "zapa" absent de la couche BAL)')
+            do_bal = False
+
+        total = sum(len(feats) for _l, feats, _f in layers)
+        prog = QProgressDialog('Contrôles divers…', 'Annuler', 0, max(total, 1), self)
+        prog.setWindowTitle('Analyse en cours')
+        prog.setMinimumDuration(0)
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+
+        results = []   # (controle, lyr, fid, ident, sro, detail)
+        i = 0
+        for lyr, feats, fnames in layers:
+            is_infra = infra is not None and lyr is infra
+            is_zapa  = zapa is not None and lyr is zapa
+            is_bal   = bal is not None and lyr is bal
+            required = [f for f in ('id_pa', 'sro', 'nro') if f in fnames]
+            for ft in feats:
+                i += 1
+                if i % 200 == 0:
+                    prog.setValue(i)
+                    QApplication.processEvents()
+                    if prog.wasCanceled():
+                        break
+
+                ident = _best_id(ft, fnames)
+                sro_v = _sro_of(ft, fnames)
+                geom = ft.geometry()
+                geom_vide = geom is None or geom.isEmpty()
+
+                if do_geom:
+                    if geom_vide:
+                        results.append(('Géométrie vide', lyr, ft.id(), ident,
+                                        sro_v, 'géométrie nulle ou vide'))
+                    elif not geom.isGeosValid():
+                        results.append(('Géométrie invalide', lyr, ft.id(), ident,
+                                        sro_v, 'géométrie non valide (GEOS)'))
+
+                if is_infra:
+                    if do_micro and not geom_vide:
+                        length = geom.length()
+                        if length < seuil:
+                            results.append((
+                                'Micro-tronçon', lyr, ft.id(), ident, sro_v,
+                                'longueur nulle' if length <= 0
+                                else f'longueur {length:.2f} m < {seuil:g} m'))
+                    if do_champs and required:
+                        vides = [f for f in required if _is_blank(ft[f])]
+                        if vides:
+                            results.append((
+                                'Champs vides', lyr, ft.id(), ident, sro_v,
+                                'champ(s) vide(s) : ' + ', '.join(vides)))
+
+                if is_zapa and do_dup and 'id_metier' in fnames:
+                    v = ft['id_metier']
+                    if not _is_blank(v) and zapa_id_counts[str(v).strip()] > 1:
+                        results.append((
+                            'ZAPA en doublon d\'ID', lyr, ft.id(), ident, sro_v,
+                            f'id_metier "{str(v).strip()}" présent '
+                            f'{zapa_id_counts[str(v).strip()]} fois'))
+
+                if is_bal and do_bal:
+                    v = ft['zapa']
+                    if _is_blank(v):
+                        results.append((
+                            'BAL sans ZAPA', lyr, ft.id(), ident, sro_v,
+                            'champ "zapa" vide'))
+                    elif str(v).strip() not in zapa_ids:
+                        results.append((
+                            'BAL sans ZAPA', lyr, ft.id(), ident, sro_v,
+                            f'zapa "{str(v).strip()}" absente de la couche ZAPA'))
+            if prog.wasCanceled():
+                break
+        prog.setValue(max(total, 1))
+
+        # ── remplissage du tableau ───────────────────────────────────────────
+        self.tbl_qc.setSortingEnabled(False)
+        self.tbl_qc.setRowCount(0)
+        for controle, lyr, fid, ident, sro_v, detail in results:
+            row = self.tbl_qc.rowCount()
+            self.tbl_qc.insertRow(row)
+            cells = [_si(controle), _si(lyr.name()), _si(ident),
+                     _si(sro_v), _si(detail)]
+            for col, item in enumerate(cells):
+                self.tbl_qc.setItem(row, col, item)
+            self.tbl_qc.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, fid)
+            self.tbl_qc.item(row, 0).setData(Qt.ItemDataRole.UserRole + 2, lyr.id())
+        self.tbl_qc.setSortingEnabled(True)
+        self.tbl_qc.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+
+        n = len(results)
+        n_checks = sum([do_geom, do_micro, do_champs, do_bal, do_dup])
+        self.lbl_cnt_qc.setText(f'{n} anomalie(s)')
+        self._set_tab_badge(self._tabidx_qc, n)
+        self.lbl_status.setText(
+            f'Contrôles divers : {n} anomalie(s), {n_checks} contrôle(s) exécuté(s) '
+            f'sur {total} entités.')
+        if skipped:
+            QMessageBox.information(
+                self, 'Contrôles non exécutés',
+                'Certains contrôles ont été ignorés :\n  • '
+                + '\n  • '.join(skipped))
 
     # ─────────────────────────────────────────────────────────────────────────
     # TAB 6 – Extractions
@@ -3185,6 +3817,10 @@ class QDRIPDialog(QDialog):
         self.tbl_epa.setColumnHidden(self._notion_col_epa, True)
         self.tbl_epa.doubleClicked.connect(
             lambda idx: self._zoom_row(self.tbl_epa, idx.row()))
+        self._install_ctx_menu(
+            self.tbl_epa,
+            zoom_cb=lambda: self._zoom_selected(self.tbl_epa),
+            select_cb=lambda: self._select_qgis(self.tbl_epa))
         rv.addWidget(self.tbl_epa)
 
         rv.addWidget(self._extract_action_bar(
@@ -3291,6 +3927,10 @@ class QDRIPDialog(QDialog):
         self.tbl_bal_ext.setColumnHidden(self._notion_col_bal_ext, True)
         self.tbl_bal_ext.doubleClicked.connect(
             lambda idx: self._zoom_row(self.tbl_bal_ext, idx.row()))
+        self._install_ctx_menu(
+            self.tbl_bal_ext,
+            zoom_cb=lambda: self._zoom_selected(self.tbl_bal_ext),
+            select_cb=lambda: self._select_qgis(self.tbl_bal_ext))
         rv.addWidget(self.tbl_bal_ext)
 
         rv.addWidget(self._extract_action_bar(
@@ -3381,6 +4021,10 @@ class QDRIPDialog(QDialog):
         self._style_table(self.tbl_free)
         self.tbl_free.doubleClicked.connect(
             lambda idx: self._zoom_row(self.tbl_free, idx.row()))
+        self._install_ctx_menu(
+            self.tbl_free,
+            zoom_cb=lambda: self._zoom_selected(self.tbl_free),
+            select_cb=lambda: self._select_qgis(self.tbl_free))
         rv.addWidget(self.tbl_free)
 
         rv.addWidget(self._extract_action_bar(
