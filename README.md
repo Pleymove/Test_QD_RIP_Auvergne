@@ -25,10 +25,28 @@ Plugin de contrôle qualité des données RIP Auvergne.
 | Parcours les plus longs | Classement par longueur décroissante (Top N configurable) |
 | BAL éloignées infra | Contrôle de la distance BAL→infra par PM. Mode isolation (rayon 500 m par défaut) ou analyse globale. Filtre distance infra configurable (défaut 1000 m) |
 | PA sans infra | ZAPA du périmètre PM courant sans infra dans le groupement livrables (double contrôle attributaire id_pa + spatial) |
+| Contrôles divers | Contrôles de cohérence complémentaires : géométries invalides/vides, micro-tronçons, champs obligatoires vides, BAL sans ZAPA, ZAPA en doublon d'identifiant |
 | Extractions | Extraction EPA/PA filtrée sur le périmètre PM courant, export CSV/Excel/SHP |
 | Tableau de bord | Synthèse des résultats des autres onglets avec indicateurs clés |
 
 ## Changelog
+
+### Version 1.5.0
+
+**Nouvel onglet 🧪 Contrôles divers** (qualité de données complémentaire) :
+- **Géométries invalides / vides** sur Infra, ZAPA et BAL (validité GEOS)
+- **Micro-tronçons infra** : entités plus courtes qu'un seuil configurable (défaut 1 m), scories de numérisation incluses (longueur nulle)
+- **Champs obligatoires vides (infra)** : `id_pa`, `sro`, `nro` (seuls les champs présents sur la couche sont contrôlés)
+- **BAL sans ZAPA correspondante** : champ `zapa` vide ou référant un `id_metier` absent de la couche ZAPA
+- **ZAPA en doublon d'identifiant** : `id_metier` partagé par plusieurs entités
+- Chaque contrôle est activable individuellement ; respecte « Restreindre au périmètre PM » ; résultats zoomables/sélectionnables et exportables CSV / Excel / SHP (un shapefile par couche source)
+
+**Améliorations UI / UX** :
+- **Persistance des réglages entre sessions** (QSettings) : filtres, tolérances, seuils, cases à cocher, **liste PM éditée** (auparavant perdue à chaque fermeture), taille/position de la fenêtre et onglet courant
+- **Menu contextuel (clic droit)** sur tous les tableaux de résultats : Zoomer, Sélectionner dans QGIS, Copier la cellule, Copier la ligne — et « Doublon OK » sur l'onglet Doublons
+- **Badges de compteur sur les onglets** : le nombre d'anomalies s'affiche dans le titre de l'onglet après chaque analyse (ex. « ⛔ Doublons Infra (12) ») ; pour les doublons, le badge exclut les paires marquées OK
+- **Bouton « ▶ Tout analyser »** (barre du haut) : lance successivement toutes les analyses dont les couches sont sélectionnées, puis affiche un récapitulatif (effectuées / ignorées / en erreur)
+- **Bouton « ❔ Aide »** : guide rapide des onglets et astuces, avec le numéro de version
 
 ### Version 1.4.4
 - Marquage **« Doublon OK »** dans l'onglet **⛔ Doublons Infra** : les paires qui ressortent de l'analyse mais qui sont en fait légitimes peuvent être flaguées pour ne plus être revues à chaque contrôle

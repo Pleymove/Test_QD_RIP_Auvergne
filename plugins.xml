@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <plugins>
-  <pyqgis_plugin name="QD RIP Auvergne" version="1.4.4">
-    <description>Controle qualite RIP Auvergne : chevauchements C0/existant, doublons avec marquage OK, parcours longs, BAL eloignees infra, PA sans infra, extractions EPA, extraction couche libre, etat Notion</description>
-    <version>1.4.4</version>
+  <pyqgis_plugin name="QD RIP Auvergne" version="1.5.0">
+    <description>Controle qualite RIP Auvergne : chevauchements C0/existant, doublons avec marquage OK, parcours longs, BAL eloignees infra, PA sans infra, controles divers, extractions EPA, extraction couche libre, etat Notion</description>
+    <version>1.5.0</version>
     <qgis_minimum_version>3.16</qgis_minimum_version>
     <qgis_maximum_version>4.99</qgis_maximum_version>
     <homepage>https://github.com/Pleymove/Test_QD_RIP_Auvergne</homepage>
