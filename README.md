@@ -30,6 +30,14 @@ Plugin de contrôle qualité des données RIP Auvergne.
 
 ## Changelog
 
+### Version 1.4.4
+- Marquage **« Doublon OK »** dans l'onglet **⛔ Doublons Infra** : les paires qui ressortent de l'analyse mais qui sont en fait légitimes peuvent être flaguées pour ne plus être revues à chaque contrôle
+- Nouveau bouton **👌 Doublon OK** dans la barre d'actions : marque la ligne sélectionnée comme doublon assumé (recliquer sur une ligne déjà OK retire le marquage)
+- Nouvelle case **« Masquer les doublons OK »** (cochée par défaut) : les paires marquées disparaissent de la liste ; décochez-la pour les revoir (colonne **OK** avec un ✔ vert) et éventuellement retirer un marquage
+- Les doublons masqués sont aussi exclus des exports (Excel/SHP portent sur les lignes visibles) et du rapport généré
+- Persistance **dans le projet QGIS** (entrées personnalisées du `.qgz`) : la liste des doublons OK est retrouvée aux prochaines analyses et voyage avec le fichier projet — pensez à **enregistrer le projet** après marquage
+- Clé de marquage stable : nom de la couche + paire d'identifiants d'entité (`fid`) triés — fiable avec des sources PostGIS/GeoPackage dont le `fid` est la clé primaire
+
 ### Version 1.4.3
 - État Notion limité au sujet de chaque onglet (une seule colonne pertinente par tableau, fini les colonnes hors sujet)
 - Extraction d'une couche quelconque depuis l'onglet **Extractions**, export CSV/Excel/SHP avec les boutons existants

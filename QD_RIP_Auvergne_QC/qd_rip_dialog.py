@@ -38,6 +38,10 @@ from .notion_client import NotionFetchWorker, notion_color_to_qcolor
 # Réglages QSettings pour l'intégration Notion (jeton JAMAIS stocké dans le code)
 NOTION_SETTINGS_GROUP = 'QD_RIP_Auvergne/notion'
 
+# Scope des entrées personnalisées stockées DANS le projet QGIS (.qgz/.qgs).
+# Utilisé pour les doublons marqués "OK" : la liste voyage avec le projet.
+PROJECT_SCOPE = 'QD_RIP_Auvergne'
+
 # Resolution du filtre de couche, compatible QGIS 3.16 -> 4.x
 try:
     from qgis.core import Qgis
@@ -116,6 +120,10 @@ class QDRIPDialog(QDialog):
         self._pm_codes = list(DEFAULT_PM_CODES)
         self._pm_set = set(self._pm_codes)
         self._pa_ignored_empty_zapa = 0
+
+        # ── Doublons marqués "OK" (faux positifs assumés) ───────────────────
+        # Clés "nom_couche|fid_min|fid_max", persistées dans le projet QGIS.
+        self._doub_ok_keys = self._load_doub_ok_flags()
 
         # ── État Notion (PA / BAL) ──────────────────────────────────────────
         self._notion_pa_map = None      # dict id_epa -> {etat, couleur, url} ou None
@@ -1084,18 +1092,25 @@ class QDRIPDialog(QDialog):
         sh.addWidget(QLabel('Recherche :'))
         self.le_srch_doub = QLineEdit()
         self.le_srch_doub.setPlaceholderText('Filtrer…')
-        self.le_srch_doub.textChanged.connect(
-            lambda t: self._filter_table_multi(self.tbl_doub, t))
+        self.le_srch_doub.textChanged.connect(lambda t: self._refilter_doub())
         sh.addWidget(self.le_srch_doub, 1)
+        self.chk_hide_doub_ok = QCheckBox('Masquer les doublons OK')
+        self.chk_hide_doub_ok.setChecked(True)
+        self.chk_hide_doub_ok.setToolTip(
+            'Masque les paires marquées "Doublon OK" (faux positifs assumés).\n'
+            'Décochez pour les revoir et éventuellement retirer le marquage.'
+        )
+        self.chk_hide_doub_ok.toggled.connect(lambda _: self._refilter_doub())
+        sh.addWidget(self.chk_hide_doub_ok)
         self.lbl_cnt_doub = QLabel('—')
         sh.addWidget(self.lbl_cnt_doub)
         rv.addLayout(sh)
 
-        self.tbl_doub = QTableWidget(0, 9)
+        self.tbl_doub = QTableWidget(0, 10)
         self.tbl_doub.setHorizontalHeaderLabels([
             'ID feat. 1', 'id_pa 1', 'NRO 1', 'Long. 1 (m)',
             'ID feat. 2', 'id_pa 2', 'NRO 2', 'Long. 2 (m)',
-            'Chevauch. (m)',
+            'Chevauch. (m)', 'OK',
         ])
         self._style_table(self.tbl_doub)
         self.tbl_doub.doubleClicked.connect(
@@ -1103,7 +1118,17 @@ class QDRIPDialog(QDialog):
         )
         rv.addWidget(self.tbl_doub)
 
-        ab, bz, bs, bc = self._action_bar(self.tbl_doub, 'doub')
+        btn_ok_doub = QPushButton('👌  Doublon OK')
+        btn_ok_doub.setToolTip(
+            'Marque la ligne sélectionnée comme doublon légitime (ou retire le\n'
+            'marquage si elle est déjà OK). Les doublons OK sont masqués tant que\n'
+            'la case "Masquer les doublons OK" est cochée, et exclus du rapport.\n'
+            'La liste est enregistrée dans le projet QGIS (pensez à sauvegarder\n'
+            'le projet) : elle est retrouvée aux prochaines analyses.'
+        )
+        btn_ok_doub.clicked.connect(self._toggle_doub_ok)
+        ab, bz, bs, bc = self._action_bar(self.tbl_doub, 'doub',
+                                          extra_widgets=[btn_ok_doub])
         bz.clicked.connect(lambda: self._zoom_row_doub(
             self.tbl_doub.currentRow()
         ))
@@ -1515,6 +1540,108 @@ class QDRIPDialog(QDialog):
     # ─────────────────────────────────────────────────────────────────────────
     # ANALYSIS – Tab 2: Doublons
     # ─────────────────────────────────────────────────────────────────────────
+    # ── Doublons "OK" : marquage des faux positifs assumés ──────────────────
+    # Une paire marquée OK est masquée par défaut (case "Masquer les doublons
+    # OK") et exclue du rapport ; la liste des clés est stockée dans le projet
+    # QGIS (entrées personnalisées), donc partagée avec le fichier .qgz.
+
+    _DOUB_COL_OK = 9  # index de la colonne "OK" dans tbl_doub
+
+    @staticmethod
+    def _doub_pair_key(layer_name, fid1, fid2):
+        """Clé stable d'une paire de doublons : nom de couche + fids triés.
+
+        Repose sur la stabilité des identifiants d'entité du fournisseur
+        (clé primaire PostGIS/GeoPackage) ; suffisant pour l'usage QC.
+        """
+        a, b = sorted((int(fid1), int(fid2)))
+        return f'{layer_name}|{a}|{b}'
+
+    @staticmethod
+    def _load_doub_ok_flags():
+        keys, ok = QgsProject.instance().readListEntry(
+            PROJECT_SCOPE, 'doublons_ok')
+        return set(keys) if ok and keys else set()
+
+    def _save_doub_ok_flags(self):
+        QgsProject.instance().writeEntry(
+            PROJECT_SCOPE, 'doublons_ok', sorted(self._doub_ok_keys))
+
+    def _doub_row_key(self, row):
+        """Clé de la paire affichée à la ligne `row`, ou None si indisponible."""
+        item0 = self.tbl_doub.item(row, 0)
+        item4 = self.tbl_doub.item(row, 4)
+        if not item0 or not item4:
+            return None
+        fid1 = item0.data(Qt.ItemDataRole.UserRole + 1)
+        fid2 = item4.data(Qt.ItemDataRole.UserRole + 1)
+        layer_id = item0.data(Qt.ItemDataRole.UserRole + 2)
+        if fid1 is None or fid2 is None:
+            return None
+        lyr = QgsProject.instance().mapLayer(layer_id) if layer_id else None
+        layer_name = lyr.name() if lyr else str(layer_id or '')
+        return self._doub_pair_key(layer_name, fid1, fid2)
+
+    def _set_doub_ok_cell(self, row, flagged):
+        """Met à jour la cellule "OK" de la ligne (✔ vert ou vide)."""
+        tbl = self.tbl_doub
+        was_sorting = tbl.isSortingEnabled()
+        tbl.setSortingEnabled(False)
+        item = tbl.item(row, self._DOUB_COL_OK)
+        if item is None:
+            item = _si('')
+            tbl.setItem(row, self._DOUB_COL_OK, item)
+        item.setText('✔' if flagged else '')
+        item.setForeground(QBrush(QColor('#27ae60')))
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
+        tbl.setSortingEnabled(was_sorting)
+
+    def _toggle_doub_ok(self):
+        row = self.tbl_doub.currentRow()
+        if row < 0:
+            QMessageBox.information(
+                self, 'Doublon OK',
+                'Sélectionnez d\'abord une ligne du tableau.')
+            return
+        key = self._doub_row_key(row)
+        if key is None:
+            return
+        if key in self._doub_ok_keys:
+            self._doub_ok_keys.discard(key)
+        else:
+            self._doub_ok_keys.add(key)
+        self._save_doub_ok_flags()
+        self._set_doub_ok_cell(row, key in self._doub_ok_keys)
+        self._refilter_doub()
+
+    def _refilter_doub(self):
+        """Filtre combiné du tableau doublons : texte + masquage des OK."""
+        hide_ok = self.chk_hide_doub_ok.isChecked()
+
+        def _pred(row):
+            item = self.tbl_doub.item(row, self._DOUB_COL_OK)
+            return not (hide_ok and item is not None and item.text() == '✔')
+
+        self._filter_table_multi(self.tbl_doub, self.le_srch_doub.text(),
+                                 extra_predicate=_pred)
+        self._update_doub_count()
+
+    def _update_doub_count(self):
+        tbl = self.tbl_doub
+        total = tbl.rowCount()
+        n_ok = sum(
+            1 for r in range(total)
+            if tbl.item(r, self._DOUB_COL_OK)
+            and tbl.item(r, self._DOUB_COL_OK).text() == '✔')
+        visible = sum(1 for r in range(total) if not tbl.isRowHidden(r))
+        if n_ok:
+            self.lbl_cnt_doub.setText(
+                f'{visible} affiché(s) / {total} doublon(s) — {n_ok} OK')
+        else:
+            self.lbl_cnt_doub.setText(f'{total} doublon(s)')
+
     def _run_doublons(self):
         lyr = self.cb_infra_doub.currentLayer()
         if not lyr:
@@ -1524,6 +1651,9 @@ class QDRIPDialog(QDialog):
         flt    = self.le_flt_doub.text().strip()
         tol    = self.sp_tol_doub.value()
         min_ov = self.sp_min_doub.value()
+
+        # Recharge les doublons "OK" depuis le projet (au cas où il a changé)
+        self._doub_ok_keys = self._load_doub_ok_flags()
 
         req = QgsFeatureRequest()
         if flt:
@@ -1633,6 +1763,7 @@ class QDRIPDialog(QDialog):
                 _si(r['nro2']),
                 _ni(f"{r['long2']:.1f}"),
                 _ni(f"{r['ov']:.1f}"),
+                _si(''),
             ]
             for col, item in enumerate(cells):
                 self.tbl_doub.setItem(row, col, item)
@@ -1641,11 +1772,15 @@ class QDRIPDialog(QDialog):
             self.tbl_doub.item(row, 0).setData(Qt.ItemDataRole.UserRole + 2, r['layer_id'])
             self.tbl_doub.item(row, 4).setData(Qt.ItemDataRole.UserRole + 1, r['fid2'])
 
+            key = self._doub_pair_key(lyr.name(), r['fid1'], r['fid2'])
+            if key in self._doub_ok_keys:
+                self._set_doub_ok_cell(row, True)
+
         self.tbl_doub.setSortingEnabled(True)
         self.tbl_doub.sortByColumn(8, Qt.SortOrder.DescendingOrder)
 
         n = len(results)
-        self.lbl_cnt_doub.setText(f'{n} doublon(s)')
+        self._refilter_doub()
         self.lbl_status.setText(
             f'Doublons : {n} paire(s) sur {len(feats)} entités.')
         self._refresh_rapport_tab()
