@@ -70,6 +70,8 @@ except (ImportError, AttributeError):
 class _NumItem(QTableWidgetItem):
     def __lt__(self, other):
         def _num(s):
+            if s.strip().startswith('∞'):
+                return float('inf')
             try:
                 return float(s.replace('%', '').replace(' m', '').replace(',', '.').strip())
             except ValueError:
@@ -306,7 +308,7 @@ class QDRIPDialog(QDialog):
         infra = self._find_layer(*hints['infra'])
         for cb in (self.cb_infra_chev, self.cb_infra_doub,
                    self.cb_infra_parc, self.cb_infra_bal,
-                   self.cb_infra_qc):
+                   self.cb_infra_qc, self.cb_infra_pc):
             if infra:
                 cb.setLayer(infra)
 
@@ -355,6 +357,15 @@ class QDRIPDialog(QDialog):
         bal_ext = self._find_extraction_bal_layer()
         if bal_ext:
             self.cb_bal_extract.setLayer(bal_ext)
+
+        # Prises les plus chères : la couche BAL "serveur" (champs sro+zapa)
+        # en priorité, sinon la couche BAL générique. Peuplement explicite du
+        # combo des champs : layerChanged n'est PAS émis si la couche voulue
+        # était déjà celle auto-sélectionnée par le QgsMapLayerComboBox.
+        pc_bal = pa_bal or bal
+        if pc_bal:
+            self.cb_bal_pc.setLayer(pc_bal)
+        self._populate_nbpr_fields()
 
     def _find_extraction_pa_layer(self):
         """Locate the EPA/PA point layer for the Extractions tab.
@@ -501,6 +512,7 @@ class QDRIPDialog(QDialog):
         self._tabidx_bal  = _add_tab(self._tab_bal(),           '📍  BAL éloignées infra')
         self._tabidx_pa   = _add_tab(self._tab_pa_sans_infra(), '🚫  PA sans infra')
         self._tabidx_qc   = _add_tab(self._tab_qc(),            '🧪  Contrôles divers')
+        self._tabidx_prises = _add_tab(self._tab_prises(),      '💰  Prises les plus chères')
         _add_tab(self._tab_extractions(), '📤  Extractions')
         _add_tab(self._tab_rapport(),     '📊  Tableau de bord')
         root.addWidget(self.tabs)
@@ -590,6 +602,8 @@ class QDRIPDialog(QDialog):
             'qc/champs':       self.chk_qc_champs,
             'qc/bal_zapa':     self.chk_qc_bal,
             'qc/dup_zapa':     self.chk_qc_dup,
+            'prises/filter':   self.le_flt_pc,
+            'prises/seuil':    self.sp_seuil_pc,
         }
 
     def _save_ui_settings(self):
@@ -605,6 +619,7 @@ class QDRIPDialog(QDialog):
         s.setValue('pm_codes', self._pm_codes)
         s.setValue('geometry', self.saveGeometry())
         s.setValue('tab', self.tabs.currentIndex())
+        s.setValue('prises/champ', self.cmb_nbpr_pc.currentText())
         s.endGroup()
 
     def _restore_ui_settings(self):
@@ -639,6 +654,10 @@ class QDRIPDialog(QDialog):
             tab = s.value('tab', -1, type=int)
             if 0 <= tab < self.tabs.count():
                 self.tabs.setCurrentIndex(tab)
+            champ = s.value('prises/champ', '', type=str)
+            if champ:
+                self._prises_field_pref = champ
+                self._populate_nbpr_fields()
         finally:
             s.endGroup()
 
@@ -810,6 +829,8 @@ class QDRIPDialog(QDialog):
              [self.cb_zapa, self.cb_infra_pa, self.cb_bal_pa]),
             ('Contrôles divers', self._run_qc,
              [self.cb_infra_qc]),
+            ('Prises les plus chères', self._run_prises,
+             [self.cb_infra_pc, self.cb_bal_pc]),
         ]
         done, skipped, failed = [], [], []
         for name, fn, combos in jobs:
@@ -877,6 +898,10 @@ class QDRIPDialog(QDialog):
                   (contrôles attributaire + spatial), avec état Notion du PA.</li>
               <li><b>🧪 Contrôles divers</b> : géométries invalides/vides, micro-tronçons,
                   champs obligatoires vides, BAL sans ZAPA, ZAPA en doublon d'identifiant.</li>
+              <li><b>💰 Prises les plus chères</b> : classement des PM par linéaire
+                  d'infra, puis détail par PA (m/prise) du PM sélectionné pour repérer
+                  les infra longues qui desservent peu de prises. Seuil d'alerte
+                  ajustable en direct, zoom/sélection de l'infra d'un PM ou d'un PA.</li>
               <li><b>📤 Extractions</b> : EPA / BAL du périmètre, ou n'importe quelle
                   couche vecteur (« Couche libre »), export CSV / Excel / SHP.</li>
               <li><b>📊 Tableau de bord</b> : synthèse ; « Générer Rapport » produit un
@@ -3676,6 +3701,595 @@ class QDRIPDialog(QDialog):
                 self, 'Contrôles non exécutés',
                 'Certains contrôles ont été ignorés :\n  • '
                 + '\n  • '.join(skipped))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 5 ter – Prises les plus chères (m d'infra par prise)
+    # ─────────────────────────────────────────────────────────────────────────
+    # Vue maître/détail : classement des PM (sro) par linéaire d'infra, puis
+    # détail par PA (id_pa) du PM sélectionné pour repérer les infra longues
+    # qui desservent peu de prises (ratio m/prise élevé).
+    # Rattachements : infra→PM par "sro", infra→PA par "id_pa",
+    # BAL→PM par "sro", BAL→PA par "zapa" (= id_pa côté infra).
+
+    _NBPR_COUNT_LABEL = '(1 prise par BAL)'
+    _PRISES_KEY_ROLE  = Qt.ItemDataRole.UserRole + 10
+
+    def _tab_prises(self):
+        root = QWidget()
+        h = QHBoxLayout(root)
+
+        cfg = QGroupBox('Configuration')
+        cfg.setFixedWidth(310)
+        vbox = QVBoxLayout(cfg)
+
+        frm = QFormLayout()
+        self.cb_infra_pc = QgsMapLayerComboBox()
+        self.cb_infra_pc.setFilters(_F_LINE)
+        frm.addRow('Couche Infra :', self.cb_infra_pc)
+
+        self.cb_bal_pc = QgsMapLayerComboBox()
+        self.cb_bal_pc.setFilters(_F_POINT)
+        self.cb_bal_pc.setToolTip(
+            'Couche BAL (points). Champs utilisés : "sro" (rattachement PM)\n'
+            'et "zapa" (rattachement PA).')
+        self.cb_bal_pc.layerChanged.connect(
+            lambda lyr: self._populate_nbpr_fields(lyr))
+        frm.addRow('Couche BAL :', self.cb_bal_pc)
+
+        self.le_flt_pc = QLineEdit('"statut" = \'C\'')
+        self.le_flt_pc.setToolTip(
+            'Filtre QGIS appliqué à la couche Infra.\n'
+            'Par défaut, seule l\'infra à créer ("statut" = \'C\') est comptée :\n'
+            'c\'est elle qui porte le coût. Videz le champ pour tout compter.')
+        frm.addRow('Filtre Infra :', self.le_flt_pc)
+
+        self.cmb_nbpr_pc = QComboBox()
+        self.cmb_nbpr_pc.setToolTip(
+            'Nombre de prises par BAL :\n'
+            '• "(1 prise par BAL)" : chaque BAL compte pour 1 prise\n'
+            '• ou choisissez un champ numérique de la couche BAL\n'
+            '  (ex. nombre de logements / lignes) pour pondérer.')
+        self.cmb_nbpr_pc.addItem(self._NBPR_COUNT_LABEL)
+        frm.addRow('Nb prises :', self.cmb_nbpr_pc)
+
+        self.sp_seuil_pc = QDoubleSpinBox()
+        self.sp_seuil_pc.setRange(1.0, 100000.0)
+        self.sp_seuil_pc.setValue(100.0)
+        self.sp_seuil_pc.setSuffix(' m/prise')
+        self.sp_seuil_pc.setToolTip(
+            'Seuil d\'alerte : les PM et PA dont le ratio m/prise dépasse ce\n'
+            'seuil sont surlignés en orange (rouge si aucune prise).\n'
+            'Modifiable après analyse : le surlignage se met à jour en direct.')
+        self.sp_seuil_pc.valueChanged.connect(lambda _v: self._recolor_prises())
+        frm.addRow('Seuil alerte :', self.sp_seuil_pc)
+        vbox.addLayout(frm)
+
+        info = QLabel(
+            '<small><i>Classe les PM par linéaire d\'infra décroissant '
+            '(longueur : champ "long", sinon géométrie). Cliquez un PM pour '
+            'voir le détail par PA et repérer les infra longues avec peu de '
+            'prises.<br>'
+            'Surlignage : <span style="background:#f6b26b;">&nbsp;ratio ≥ seuil&nbsp;'
+            '</span>, <span style="background:#e06666;">&nbsp;aucune prise&nbsp;</span>.'
+            '<br>Respecte « Restreindre au périmètre PM ».</i></small>'
+        )
+        info.setWordWrap(True)
+        vbox.addWidget(info)
+        vbox.addStretch()
+
+        btn_run = QPushButton('▶  Lancer l\'analyse')
+        btn_run.setStyleSheet('font-weight:bold; padding:6px;')
+        btn_run.clicked.connect(self._run_prises)
+        vbox.addWidget(btn_run)
+        h.addWidget(cfg)
+
+        # ── Résultats : PM (haut) / détail PA (bas) ──────────────────────────
+        res = QWidget()
+        rv = QVBoxLayout(res)
+        rv.setContentsMargins(0, 0, 0, 0)
+
+        split = QSplitter(Qt.Orientation.Vertical)
+
+        top = QWidget()
+        tv = QVBoxLayout(top)
+        tv.setContentsMargins(0, 0, 0, 0)
+        sh = QHBoxLayout()
+        sh.addWidget(QLabel('Recherche PM :'))
+        self.le_srch_pc = QLineEdit()
+        self.le_srch_pc.setPlaceholderText('Filtrer…')
+        self.le_srch_pc.textChanged.connect(
+            lambda t: self._filter_table_multi(self.tbl_pm_pc, t))
+        sh.addWidget(self.le_srch_pc, 1)
+        self.lbl_cnt_pc = QLabel('—')
+        sh.addWidget(self.lbl_cnt_pc)
+        tv.addLayout(sh)
+
+        self.tbl_pm_pc = QTableWidget(0, 7)
+        self.tbl_pm_pc.setHorizontalHeaderLabels([
+            'Rang', 'SRO / PM', 'Linéaire (m)', 'Nb PA',
+            'Nb BAL', 'Nb prises', 'm / prise',
+        ])
+        self._style_table(self.tbl_pm_pc)
+        self.tbl_pm_pc.itemSelectionChanged.connect(self._on_prises_pm_selected)
+        self.tbl_pm_pc.doubleClicked.connect(
+            lambda idx: self._zoom_prises_pm())
+        self._install_ctx_menu(
+            self.tbl_pm_pc,
+            zoom_cb=self._zoom_prises_pm,
+            select_cb=self._select_prises_pm)
+        tv.addWidget(self.tbl_pm_pc)
+
+        ab1 = QHBoxLayout()
+        b = QPushButton('🔍  Zoom PM')
+        b.setToolTip('Zoomer sur l\'emprise de l\'infra du PM sélectionné\n'
+                     '(double-clic sur la ligne = même action)')
+        b.clicked.connect(self._zoom_prises_pm)
+        ab1.addWidget(b)
+        b = QPushButton('✓  Sélectionner l\'infra du PM')
+        b.setToolTip('Sélectionne dans QGIS toutes les entités infra du PM')
+        b.clicked.connect(self._select_prises_pm)
+        ab1.addWidget(b)
+        ab1.addStretch()
+        b = QPushButton('💾  Exporter CSV')
+        b.clicked.connect(lambda: self._export_csv_table(
+            self.tbl_pm_pc, 'prises_cheres_pm'))
+        ab1.addWidget(b)
+        b = QPushButton('📊  Exporter Excel')
+        b.clicked.connect(lambda: self._export_xlsx(
+            self.tbl_pm_pc, 'prises_cheres_pm'))
+        ab1.addWidget(b)
+        tv.addLayout(ab1)
+        split.addWidget(top)
+
+        bottom = QWidget()
+        bv = QVBoxLayout(bottom)
+        bv.setContentsMargins(0, 4, 0, 0)
+        self.lbl_detail_pc = QLabel(
+            '<i>Détail par PA — sélectionnez un PM ci-dessus.</i>')
+        bv.addWidget(self.lbl_detail_pc)
+
+        self.tbl_pa_pc = QTableWidget(0, 6)
+        self.tbl_pa_pc.setHorizontalHeaderLabels([
+            'id_pa', 'Linéaire (m)', '% du PM',
+            'Nb BAL', 'Nb prises', 'm / prise',
+        ])
+        self._style_table(self.tbl_pa_pc)
+        self.tbl_pa_pc.doubleClicked.connect(
+            lambda idx: self._zoom_prises_pa())
+        self._install_ctx_menu(
+            self.tbl_pa_pc,
+            zoom_cb=self._zoom_prises_pa,
+            select_cb=self._select_prises_pa)
+        bv.addWidget(self.tbl_pa_pc)
+
+        ab2 = QHBoxLayout()
+        b = QPushButton('🔍  Zoom PA')
+        b.setToolTip('Zoomer sur l\'infra du PA sélectionné')
+        b.clicked.connect(self._zoom_prises_pa)
+        ab2.addWidget(b)
+        b = QPushButton('✓  Sélectionner l\'infra du PA')
+        b.setToolTip('Sélectionne dans QGIS les entités infra rattachées au PA\n'
+                     '(pratique pour inspecter ou exporter ensuite)')
+        b.clicked.connect(self._select_prises_pa)
+        ab2.addWidget(b)
+        ab2.addStretch()
+        b = QPushButton('💾  Exporter CSV')
+        b.clicked.connect(lambda: self._export_csv_table(
+            self.tbl_pa_pc, 'prises_cheres_detail_pa'))
+        ab2.addWidget(b)
+        b = QPushButton('📊  Exporter Excel')
+        b.clicked.connect(lambda: self._export_xlsx(
+            self.tbl_pa_pc, 'prises_cheres_detail_pa'))
+        ab2.addWidget(b)
+        bv.addLayout(ab2)
+        split.addWidget(bottom)
+
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        rv.addWidget(split)
+        h.addWidget(res, 1)
+
+        # État interne de l'analyse
+        self._prises_data = {}          # sro -> agrégats PM (+ 'pa' par id_pa)
+        self._prises_layer_id = None    # couche infra analysée
+        self._prises_current_pm = None  # PM affiché dans le détail
+        self._prises_filling = False    # anti-réentrance selectionChanged
+        return root
+
+    def _populate_nbpr_fields(self, lyr=None):
+        """(Re)liste les champs numériques de la couche BAL dans le combo."""
+        if lyr is None:
+            lyr = self.cb_bal_pc.currentLayer()
+        # La préférence restaurée (QSettings) n'est appliquée qu'UNE fois au
+        # démarrage ; ensuite c'est le choix courant de l'utilisateur qui prime
+        # lors des repeuplements (changement de couche BAL).
+        wanted = self.cmb_nbpr_pc.currentText()
+        pref = getattr(self, '_prises_field_pref', None)
+        if pref:
+            wanted = pref
+            self._prises_field_pref = None
+        self.cmb_nbpr_pc.blockSignals(True)
+        self.cmb_nbpr_pc.clear()
+        self.cmb_nbpr_pc.addItem(self._NBPR_COUNT_LABEL)
+        if lyr is not None:
+            try:
+                for fld in lyr.fields():
+                    if fld.isNumeric():
+                        self.cmb_nbpr_pc.addItem(fld.name())
+            except Exception:
+                pass
+        idx = self.cmb_nbpr_pc.findText(wanted) if wanted else -1
+        self.cmb_nbpr_pc.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cmb_nbpr_pc.blockSignals(False)
+
+    # ── helpers communs de l'onglet ──────────────────────────────────────────
+
+    @staticmethod
+    def _fmt_prises(v):
+        """Affichage entier si la valeur est entière, sinon 1 décimale."""
+        return str(int(round(v))) if abs(v - round(v)) < 1e-9 else f'{v:.1f}'
+
+    @staticmethod
+    def _ratio_text(length, prises):
+        return f'{length / prises:.1f}' if prises > 0 else '∞'
+
+    def _prises_row_key(self, tbl, row):
+        item = tbl.item(row, 0)
+        return item.data(self._PRISES_KEY_ROLE) if item else None
+
+    def _prises_selected_key(self, tbl):
+        rows = tbl.selectionModel().selectedRows()
+        if not rows:
+            QMessageBox.information(self, 'Info', 'Sélectionnez une ligne.')
+            return None
+        return self._prises_row_key(tbl, rows[0].row())
+
+    def _zoom_prises_bbox(self, bbox):
+        if not bbox:
+            QMessageBox.information(
+                self, 'Zoom', 'Aucune géométrie à zoomer pour cette ligne.')
+            return
+        rect = QgsRectangle(bbox[0], bbox[1], bbox[2], bbox[3])
+        pad = max(rect.width() * 0.15, rect.height() * 0.15, 50.0)
+        rect.grow(pad)
+        iface.mapCanvas().setExtent(rect)
+        iface.mapCanvas().refresh()
+
+    def _select_prises_fids(self, fids):
+        lyr = (QgsProject.instance().mapLayer(self._prises_layer_id)
+               if self._prises_layer_id else None)
+        if not lyr or not fids:
+            QMessageBox.information(
+                self, 'Sélection', 'Aucune entité infra à sélectionner.')
+            return
+        for l in QgsProject.instance().mapLayers().values():
+            if hasattr(l, 'removeSelection'):
+                l.removeSelection()
+        lyr.selectByIds(list(fids))
+        iface.setActiveLayer(lyr)
+
+    def _zoom_prises_pm(self):
+        key = self._prises_selected_key(self.tbl_pm_pc)
+        if key is not None and key in self._prises_data:
+            self._zoom_prises_bbox(self._prises_data[key]['bbox'])
+
+    def _select_prises_pm(self):
+        key = self._prises_selected_key(self.tbl_pm_pc)
+        if key is not None and key in self._prises_data:
+            fids = []
+            for pa in self._prises_data[key]['pa'].values():
+                fids.extend(pa['fids'])
+            self._select_prises_fids(fids)
+
+    def _zoom_prises_pa(self):
+        key = self._prises_selected_key(self.tbl_pa_pc)
+        pm = self._prises_data.get(self._prises_current_pm)
+        if key is not None and pm and key in pm['pa']:
+            self._zoom_prises_bbox(pm['pa'][key]['bbox'])
+
+    def _select_prises_pa(self):
+        key = self._prises_selected_key(self.tbl_pa_pc)
+        pm = self._prises_data.get(self._prises_current_pm)
+        if key is not None and pm and key in pm['pa']:
+            self._select_prises_fids(pm['pa'][key]['fids'])
+
+    # ── analyse ──────────────────────────────────────────────────────────────
+
+    def _run_prises(self):
+        infra = self.cb_infra_pc.currentLayer()
+        bal   = self.cb_bal_pc.currentLayer()
+        if not infra or not bal:
+            QMessageBox.warning(self, 'Prises les plus chères',
+                                'Sélectionnez les couches Infra et BAL.')
+            return
+
+        infra_fn = infra.fields().names()
+        bal_fn   = bal.fields().names()
+        missing = []
+        if 'sro' not in infra_fn:
+            missing.append(f'Couche Infra "{infra.name()}" : champ "sro" absent')
+        if 'sro' not in bal_fn:
+            missing.append(f'Couche BAL "{bal.name()}" : champ "sro" absent')
+        if missing:
+            QMessageBox.warning(self, 'Champs requis manquants',
+                                '\n'.join(missing))
+            return
+        has_idpa  = 'id_pa' in infra_fn
+        has_zapa  = 'zapa' in bal_fn
+        has_long  = 'long' in infra_fn
+
+        field = self.cmb_nbpr_pc.currentText()
+        prise_field = field if (field and field != self._NBPR_COUNT_LABEL
+                                and field in bal_fn) else None
+
+        req = QgsFeatureRequest()
+        flt = self.le_flt_pc.text().strip()
+        if flt:
+            req.setFilterExpression(flt)
+        infra_feats = [f for f in infra.getFeatures(req)
+                       if self._in_pm(f, infra_fn)]
+        bal_feats = [f for f in bal.getFeatures() if self._in_pm(f, bal_fn)]
+        if not infra_feats:
+            QMessageBox.information(
+                self, 'Info', 'Aucune entité infra avec ce filtre.')
+            return
+
+        prog = QProgressDialog(
+            'Analyse m/prise…', 'Annuler', 0,
+            len(infra_feats) + len(bal_feats), self)
+        prog.setWindowTitle('Analyse en cours')
+        prog.setMinimumDuration(0)
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+
+        def _key(v, fallback):
+            # str(NULL QGIS) donne 'NULL' sous PyQt5/QGIS 3.x : traité comme vide
+            s = str(v).strip() if v is not None else ''
+            return s if s and s != 'NULL' else fallback
+
+        def _merge_bbox(bbox, rect):
+            if rect is None or rect.isNull():
+                return bbox
+            if bbox is None:
+                return [rect.xMinimum(), rect.yMinimum(),
+                        rect.xMaximum(), rect.yMaximum()]
+            bbox[0] = min(bbox[0], rect.xMinimum())
+            bbox[1] = min(bbox[1], rect.yMinimum())
+            bbox[2] = max(bbox[2], rect.xMaximum())
+            bbox[3] = max(bbox[3], rect.yMaximum())
+            return bbox
+
+        # ── passe 1 : infra → linéaire par PM et par PA ─────────────────────
+        data = {}          # sro -> agrégats
+        canceled = False
+        for i, ft in enumerate(infra_feats):
+            if i % 500 == 0:
+                prog.setValue(i)
+                QApplication.processEvents()
+                if prog.wasCanceled():
+                    canceled = True
+                    break
+            sro_k = _key(ft['sro'], '(sans sro)')
+            pa_k  = _key(ft['id_pa'], '(sans id_pa)') if has_idpa else '(sans id_pa)'
+
+            length = None
+            if has_long and ft['long'] is not None:
+                try:
+                    length = float(ft['long'])
+                except (TypeError, ValueError):
+                    length = None
+            geom = ft.geometry()
+            if length is None:
+                length = geom.length() if geom and not geom.isEmpty() else 0.0
+
+            pm = data.setdefault(sro_k, {
+                'len': 0.0, 'nb_bal': 0, 'nb_prises': 0.0,
+                'bbox': None, 'pa': {}})
+            pa = pm['pa'].setdefault(pa_k, {
+                'len': 0.0, 'fids': [], 'bbox': None,
+                'nb_bal': 0, 'nb_prises': 0.0})
+            pm['len'] += length
+            pa['len'] += length
+            pa['fids'].append(ft.id())
+            if geom and not geom.isEmpty():
+                rect = geom.boundingBox()
+                pm['bbox'] = _merge_bbox(pm['bbox'], rect)
+                pa['bbox'] = _merge_bbox(pa['bbox'], rect)
+
+        # ── passe 2 : BAL → prises par PM et par PA ─────────────────────────
+        bal_hors_pm    = 0   # BAL sans sro ou sro absent des PM analysés
+        bal_sans_pa    = 0   # BAL comptée au PM mais PA sans infra filtrée
+        if not canceled:
+            for j, ft in enumerate(bal_feats):
+                if j % 500 == 0:
+                    prog.setValue(len(infra_feats) + j)
+                    QApplication.processEvents()
+                    if prog.wasCanceled():
+                        canceled = True
+                        break
+                if prise_field is not None:
+                    try:
+                        v = ft[prise_field]
+                        prises = float(v) if v is not None else 0.0
+                    except (TypeError, ValueError):
+                        prises = 0.0
+                else:
+                    prises = 1.0
+
+                sro_k = _key(ft['sro'], '')
+                if sro_k and sro_k in data:
+                    data[sro_k]['nb_bal'] += 1
+                    data[sro_k]['nb_prises'] += prises
+                    if has_zapa:
+                        pa_k = _key(ft['zapa'], '')
+                        if pa_k and pa_k in data[sro_k]['pa']:
+                            pa = data[sro_k]['pa'][pa_k]
+                            pa['nb_bal'] += 1
+                            pa['nb_prises'] += prises
+                        else:
+                            bal_sans_pa += 1
+                else:
+                    bal_hors_pm += 1
+        prog.setValue(len(infra_feats) + len(bal_feats))
+        if canceled:
+            return
+
+        self._prises_data = data
+        self._prises_layer_id = infra.id()
+        self._prises_current_pm = None
+
+        # ── remplissage du tableau PM (classé par linéaire décroissant) ─────
+        self._prises_filling = True
+        try:
+            tbl = self.tbl_pm_pc
+            tbl.setSortingEnabled(False)
+            tbl.setRowCount(0)
+            ordered = sorted(data.items(), key=lambda kv: -kv[1]['len'])
+            for rank, (sro_k, pm) in enumerate(ordered, start=1):
+                row = tbl.rowCount()
+                tbl.insertRow(row)
+                cells = [
+                    _ni(rank),
+                    _si(sro_k),
+                    _ni(f"{pm['len']:.0f}"),
+                    _ni(len(pm['pa'])),
+                    _ni(pm['nb_bal']),
+                    _ni(self._fmt_prises(pm['nb_prises'])),
+                    _ni(self._ratio_text(pm['len'], pm['nb_prises'])),
+                ]
+                for col, item in enumerate(cells):
+                    tbl.setItem(row, col, item)
+                tbl.item(row, 0).setData(self._PRISES_KEY_ROLE, sro_k)
+            tbl.setSortingEnabled(True)
+            tbl.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        finally:
+            self._prises_filling = False
+
+        self.tbl_pa_pc.setRowCount(0)
+        self.lbl_detail_pc.setText(
+            '<i>Détail par PA — sélectionnez un PM ci-dessus.</i>')
+
+        total_len    = sum(pm['len'] for pm in data.values())
+        total_prises = sum(pm['nb_prises'] for pm in data.values())
+        avg = (f'{total_len / total_prises:.1f} m/prise'
+               if total_prises > 0 else '∞')
+        self.lbl_cnt_pc.setText(
+            f'{len(data)} PM — {total_len:,.0f} m — '
+            f'{self._fmt_prises(total_prises)} prises — moyenne {avg}'
+            .replace(',', ' '))
+        status = (f'Prises les plus chères : {len(data)} PM, '
+                  f'{total_len:,.0f} m d\'infra.'.replace(',', ' '))
+        if bal_hors_pm:
+            status += (f' {bal_hors_pm} BAL hors PM analysés '
+                       '(sro vide ou sans infra filtrée).')
+        if bal_sans_pa:
+            status += (f' {bal_sans_pa} BAL comptées au PM mais non ventilées '
+                       'par PA (zapa sans infra filtrée).')
+        if not has_idpa:
+            status += ' Champ "id_pa" absent : détail PA regroupé.'
+        if not has_zapa:
+            status += ' Champ "zapa" absent : prises non ventilées par PA.'
+        self.lbl_status.setText(status)
+
+        self._recolor_prises()
+
+        avertissements = []
+        if not has_idpa:
+            avertissements.append(
+                f'Couche Infra "{infra.name()}" : champ "id_pa" absent — le '
+                'détail par PA est regroupé sous "(sans id_pa)".')
+        if not has_zapa:
+            avertissements.append(
+                f'Couche BAL "{bal.name()}" : champ "zapa" absent — les prises '
+                'sont comptées par PM mais pas ventilées par PA (détail à 0).')
+        if avertissements:
+            QMessageBox.information(self, 'Analyse partielle',
+                                    '\n\n'.join(avertissements))
+
+    def _on_prises_pm_selected(self):
+        if self._prises_filling:
+            return
+        rows = self.tbl_pm_pc.selectionModel().selectedRows()
+        if not rows:
+            return
+        key = self._prises_row_key(self.tbl_pm_pc, rows[0].row())
+        if key is not None and key in self._prises_data:
+            self._fill_prises_detail(key)
+
+    def _fill_prises_detail(self, sro_k):
+        pm = self._prises_data.get(sro_k)
+        if pm is None:
+            return
+        self._prises_current_pm = sro_k
+
+        tbl = self.tbl_pa_pc
+        tbl.setSortingEnabled(False)
+        tbl.setRowCount(0)
+        for pa_k, pa in pm['pa'].items():
+            row = tbl.rowCount()
+            tbl.insertRow(row)
+            pct = (f"{100.0 * pa['len'] / pm['len']:.1f} %"
+                   if pm['len'] > 0 else '')
+            cells = [
+                _si(pa_k),
+                _ni(f"{pa['len']:.0f}"),
+                _ni(pct),
+                _ni(pa['nb_bal']),
+                _ni(self._fmt_prises(pa['nb_prises'])),
+                _ni(self._ratio_text(pa['len'], pa['nb_prises'])),
+            ]
+            for col, item in enumerate(cells):
+                tbl.setItem(row, col, item)
+            tbl.item(row, 0).setData(self._PRISES_KEY_ROLE, pa_k)
+        tbl.setSortingEnabled(True)
+        tbl.sortByColumn(5, Qt.SortOrder.DescendingOrder)
+
+        ratio = self._ratio_text(pm['len'], pm['nb_prises'])
+        self.lbl_detail_pc.setText(
+            f'<b>Détail par PA — PM {sro_k}</b> : '
+            f"{pm['len']:.0f} m, {len(pm['pa'])} PA, "
+            f"{self._fmt_prises(pm['nb_prises'])} prises, "
+            f'{ratio} m/prise')
+        self._recolor_prises()
+
+    def _recolor_prises(self):
+        """Surligne les ratios m/prise selon le seuil (appelé en direct)."""
+        seuil = self.sp_seuil_pc.value()
+        col_or  = QBrush(QColor(246, 178, 107, 110))   # ≥ seuil
+        col_red = QBrush(QColor(224, 102, 102, 130))   # aucune prise
+
+        def _apply(tbl, ratio_col):
+            for row in range(tbl.rowCount()):
+                item = tbl.item(row, ratio_col)
+                if item is None:
+                    continue
+                txt = item.text().strip()
+                if txt.startswith('∞'):
+                    item.setBackground(col_red)
+                    continue
+                try:
+                    val = float(txt)
+                except ValueError:
+                    item.setData(Qt.ItemDataRole.BackgroundRole, None)
+                    continue
+                if val >= seuil:
+                    item.setBackground(col_or)
+                else:
+                    item.setData(Qt.ItemDataRole.BackgroundRole, None)
+
+        _apply(self.tbl_pm_pc, 6)
+        _apply(self.tbl_pa_pc, 5)
+
+        # Badge = nombre de PA au-dessus du seuil (ou sans prise) sur TOUS
+        # les PM : c'est le volume de travail à traiter, pas le nb de PM.
+        n_alerte = 0
+        for pm in self._prises_data.values():
+            for pa in pm['pa'].values():
+                # arrondi à 1 décimale = même règle que le texte affiché/coloré
+                if pa['nb_prises'] <= 0 or \
+                        round(pa['len'] / pa['nb_prises'], 1) >= seuil:
+                    n_alerte += 1
+        if self._prises_data:
+            self._set_tab_badge(self._tabidx_prises, n_alerte)
 
     # ─────────────────────────────────────────────────────────────────────────
     # TAB 6 – Extractions

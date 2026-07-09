@@ -26,10 +26,23 @@ Plugin de contrôle qualité des données RIP Auvergne.
 | BAL éloignées infra | Contrôle de la distance BAL→infra par PM. Mode isolation (rayon 500 m par défaut) ou analyse globale. Filtre distance infra configurable (défaut 1000 m) |
 | PA sans infra | ZAPA du périmètre PM courant sans infra dans le groupement livrables (double contrôle attributaire id_pa + spatial) |
 | Contrôles divers | Contrôles de cohérence complémentaires : géométries invalides/vides, micro-tronçons, champs obligatoires vides, BAL sans ZAPA, ZAPA en doublon d'identifiant |
+| Prises les plus chères | Classement des PM par linéaire d'infra, détail par PA (m/prise) pour repérer les infra longues avec peu de prises |
 | Extractions | Extraction EPA/PA filtrée sur le périmètre PM courant, export CSV/Excel/SHP |
 | Tableau de bord | Synthèse des résultats des autres onglets avec indicateurs clés |
 
 ## Changelog
+
+### Version 1.6.0
+
+**Nouvel onglet 💰 Prises les plus chères** — pour travailler sur le coût du réseau (m d'infra par prise) :
+- **Classement des PM** (champ `sro`) par **linéaire d'infra décroissant**, avec nb PA, nb BAL, nb prises et ratio **m/prise** par PM
+- **Détail par PA** au clic sur un PM : linéaire, % du linéaire du PM, nb BAL, nb prises et m/prise de chaque `id_pa`, trié par ratio décroissant → les infra longues qui desservent peu de prises ressortent immédiatement
+- **Seuil d'alerte m/prise configurable** (défaut 100 m/prise) : surlignage orange des ratios au-dessus du seuil, rouge pour les PA/PM **sans aucune prise** (ratio ∞) ; le surlignage et le badge d'onglet se recalculent **en direct** quand on change le seuil, sans relancer l'analyse
+- **Nb prises paramétrable** : 1 prise par BAL (défaut), ou n'importe quel champ numérique de la couche BAL (ex. nombre de logements) pour pondérer
+- **Filtre infra** par défaut `"statut" = 'C'` (l'infra à créer porte le coût), modifiable ou désactivable
+- **Zoom et sélection dans QGIS** de toute l'infra d'un PM ou d'un PA (boutons, double-clic, menu clic droit), **exports CSV / Excel** des deux tableaux
+- Rattachements : infra→PM par `sro`, infra→PA par `id_pa`, BAL→PM par `sro`, BAL→PA par `zapa` ; les BAL non rattachables sont comptées et signalées dans la barre d'état
+- Badge d'onglet = **nombre de PA au-dessus du seuil** (le volume de travail), intégré à « Tout analyser », réglages persistés (filtre, seuil, champ nb prises)
 
 ### Version 1.5.0
 
